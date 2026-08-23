@@ -255,10 +255,11 @@ REGRAS:
         
         print("ENVIANDO HISTÓRICO PARA GEMINI...")
         
-        # CONFIGURAÇÃO DO MODELO COM A BIBLIOTECA PADRÃO
         model = genai.GenerativeModel(
             model_name="gemini-1.5-flash",
             system_instruction=instrucao_ia
         )
-
+        
+        resposta_gemini = model.generate_content(
+            conteudo_envio,
         
