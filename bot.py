@@ -13,6 +13,7 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 genai.configure(api_key=GEMINI_KEY)
 
 def puxar_dados_blaze():
+    # LINK CORRETO E COMPLETO COM A API
     url = "https://blaze1.space"
     try:
         resposta = requests.get(url)
