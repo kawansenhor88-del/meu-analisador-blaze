@@ -1,7 +1,7 @@
 import os
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import requests
 import telebot
@@ -46,113 +46,253 @@ app = Flask(__name__)
 
 
 # =========================================================
-# BUSCAR HISTÓRICO
+# BUSCAR HISTÓRICO REAL DA DOUBLE
 # =========================================================
 
 def puxar_dados_blaze():
 
-    url = "https://blaze1.space"
+    urls = [
+        "https://blaze.com/api/singleplayer-originals/originals/roulette_games/recent/1",
+        "https://blaze.com/api/roulette_games/recent"
+    ]
 
-    try:
+    ultimo_erro = None
 
-        print("BUSCANDO DADOS DA BLAZE...")
+    for url in urls:
 
-        resposta = requests.get(
-            url,
-            timeout=10,
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            }
-        )
+        try:
 
-        print("STATUS BLAZE:", resposta.status_code)
+            print("========================================")
+            print("BUSCANDO HISTÓRICO REAL DA DOUBLE")
+            print("URL:", url)
+            print("========================================")
 
-        resposta.raise_for_status()
-
-        dados = resposta.json()
-
-        if not isinstance(dados, list):
-            raise ValueError(
-                f"Formato inesperado recebido da Blaze: "
-                f"{type(dados).__name__}"
+            resposta = requests.get(
+                url,
+                timeout=15,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "application/json",
+                    "Referer": "https://blaze.com/"
+                }
             )
 
-        historico = []
+            print(
+                "STATUS BLAZE:",
+                resposta.status_code
+            )
 
-        for rodada in dados:
+            print(
+                "CONTENT-TYPE:",
+                resposta.headers.get("Content-Type")
+            )
+
+            print(
+                "TAMANHO DA RESPOSTA:",
+                len(resposta.text)
+            )
+
+            resposta.raise_for_status()
+
+            # =================================================
+            # CONVERTER RESPOSTA PARA JSON
+            # =================================================
 
             try:
 
-                created_at = rodada.get("created_at")
-                color = rodada.get("color")
-                roll = rodada.get("roll")
+                dados = resposta.json()
 
-                if not created_at:
-                    continue
+            except Exception as erro_json:
 
-                data_bruta = created_at.split(".")[0].replace("Z", "")
-
-                dt = datetime.strptime(
-                    data_bruta,
-                    "%Y-%m-%dT%H:%M:%S"
-                )
-
-                horario_formatado = dt.strftime("%H:%M:%S")
-
-                if color == 0:
-                    cor = "Branco"
-
-                elif color == 1:
-                    cor = "Vermelho"
-
-                elif color == 2:
-                    cor = "Preto"
-
-                else:
-                    cor = f"Desconhecido ({color})"
-
-                historico.append({
-                    "tempo": horario_formatado,
-                    "resultado": cor,
-                    "numero": roll
-                })
-
-            except Exception as erro_rodada:
+                print("========================================")
+                print("A RESPOSTA NÃO É JSON")
+                print("========================================")
 
                 print(
-                    "ERRO AO PROCESSAR RODADA:",
-                    erro_rodada
+                    "TIPO:",
+                    type(erro_json).__name__
                 )
 
-                continue
+                print(
+                    "ERRO:",
+                    str(erro_json)
+                )
 
-        print(
-            "RODADAS PROCESSADAS:",
-            len(historico)
-        )
+                print(
+                    "RESPOSTA:",
+                    resposta.text[:1000]
+                )
 
-        return json.dumps(
-            historico,
-            ensure_ascii=False
-        )
+                raise
 
-    except Exception as erro:
+            # =================================================
+            # VERIFICAR FORMATO
+            # =================================================
 
-        print("========================================")
-        print("ERRO AO BUSCAR DADOS DA BLAZE")
-        print("========================================")
-        print("TIPO:", type(erro).__name__)
-        print("ERRO:", str(erro))
+            if not isinstance(dados, list):
 
-        traceback.print_exc()
+                raise ValueError(
+                    "A API retornou um formato inesperado: "
+                    f"{type(dados).__name__}"
+                )
 
-        return json.dumps(
-            {
-                "erro": "Não foi possível obter o histórico.",
-                "detalhes": str(erro)
-            },
-            ensure_ascii=False
-        )
+            if len(dados) == 0:
+
+                raise ValueError(
+                    "A API respondeu, mas não retornou nenhuma rodada."
+                )
+
+            historico = []
+
+            # =================================================
+            # PROCESSAR RODADAS
+            # =================================================
+
+            for rodada in dados:
+
+                try:
+
+                    created_at = rodada.get("created_at")
+                    color = rodada.get("color")
+                    roll = rodada.get("roll")
+
+                    if not created_at:
+                        continue
+
+                    if color is None:
+                        continue
+
+                    if roll is None:
+                        continue
+
+                    # =================================================
+                    # CONVERTER DATA
+                    # =================================================
+
+                    data_texto = created_at.replace(
+                        "Z",
+                        "+00:00"
+                    )
+
+                    dt = datetime.fromisoformat(
+                        data_texto
+                    )
+
+                    # =================================================
+                    # CONVERTER UTC PARA HORÁRIO DE BRASÍLIA
+                    # =================================================
+
+                    if dt.tzinfo is not None:
+
+                        dt_brasilia = dt.astimezone(
+                            timezone(
+                                timedelta(hours=-3)
+                            )
+                        )
+
+                    else:
+
+                        dt_brasilia = dt
+
+                    horario = dt_brasilia.strftime(
+                        "%H:%M:%S"
+                    )
+
+                    # =================================================
+                    # CONVERTER COR
+                    # =================================================
+
+                    if color == 0:
+
+                        cor = "Branco"
+
+                    elif color == 1:
+
+                        cor = "Vermelho"
+
+                    elif color == 2:
+
+                        cor = "Preto"
+
+                    else:
+
+                        cor = f"Desconhecido ({color})"
+
+                    # =================================================
+                    # ADICIONAR AO HISTÓRICO
+                    # =================================================
+
+                    historico.append(
+                        {
+                            "tempo": horario,
+                            "resultado": cor,
+                            "numero": roll
+                        }
+                    )
+
+                except Exception as erro_rodada:
+
+                    print(
+                        "ERRO AO PROCESSAR RODADA:",
+                        str(erro_rodada)
+                    )
+
+                    continue
+
+            # =================================================
+            # VERIFICAR RESULTADO FINAL
+            # =================================================
+
+            if not historico:
+
+                raise ValueError(
+                    "A API respondeu, mas nenhuma rodada "
+                    "pôde ser processada."
+                )
+
+            print("========================================")
+            print(
+                "RODADAS RECEBIDAS:",
+                len(historico)
+            )
+
+            print(
+                "RODADA MAIS RECENTE:",
+                historico[0]
+            )
+
+            print(
+                "RODADA MAIS ANTIGA:",
+                historico[-1]
+            )
+
+            print("========================================")
+
+            return json.dumps(
+                historico,
+                ensure_ascii=False
+            )
+
+        except Exception as erro:
+
+            ultimo_erro = erro
+
+            print("========================================")
+            print("FALHA AO BUSCAR NESTA URL")
+            print("TIPO:", type(erro).__name__)
+            print("ERRO:", str(erro))
+            print("========================================")
+
+            continue
+
+    # =========================================================
+    # TODAS AS FONTES FALHARAM
+    # =========================================================
+
+    raise RuntimeError(
+        "Não foi possível obter o histórico real da Double. "
+        f"Último erro: {ultimo_erro}"
+    )
 
 
 # =========================================================
@@ -167,7 +307,7 @@ def iniciar(message):
     bot.reply_to(
         message,
         "🤖 Bot online!\n\n"
-        "Envie uma pergunta sobre o histórico disponível."
+        "Envie uma pergunta sobre o histórico da Double."
     )
 
 
@@ -180,8 +320,17 @@ def responder_usuario(message):
 
     print("========================================")
     print("NOVA MENSAGEM RECEBIDA")
-    print("USUÁRIO:", message.from_user.id)
-    print("MENSAGEM:", message.text)
+
+    print(
+        "USUÁRIO:",
+        message.from_user.id
+    )
+
+    print(
+        "MENSAGEM:",
+        message.text
+    )
+
     print("========================================")
 
     try:
@@ -189,7 +338,7 @@ def responder_usuario(message):
         pergunta_usuario = message.text or ""
 
         # =================================================
-        # TESTE SIMPLES
+        # TESTE DO TELEGRAM
         # =================================================
 
         if pergunta_usuario.strip().upper() == "TESTE 123":
@@ -206,68 +355,92 @@ def responder_usuario(message):
             return
 
         # =================================================
-        # BUSCAR HISTÓRICO
+        # BUSCAR DADOS REAIS
         # =================================================
+
+        print(
+            "BUSCANDO HISTÓRICO REAL..."
+        )
 
         dados_blaze = puxar_dados_blaze()
 
+        print(
+            "DADOS RECEBIDOS COM SUCESSO."
+        )
+
+        print(
+            dados_blaze[:2000]
+        )
+
         # =================================================
-        # INSTRUÇÃO PARA IA
+        # INSTRUÇÃO PARA GEMINI
         # =================================================
 
         instrucao_ia = """
 Você é um interpretador estatístico estrito.
 
-Analise somente o histórico JSON fornecido.
+Analise SOMENTE o histórico JSON fornecido.
 
 Cada rodada possui:
 - tempo
 - resultado
 - numero
 
-Sua função é responder perguntas sobre os dados que realmente
-aparecem no histórico.
+O histórico está ordenado da rodada mais recente
+para a mais antiga.
 
-Você pode informar:
-- quantidade de rodadas;
-- contagens de cada resultado;
-- horários existentes;
-- sequências observadas;
-- maior sequência encontrada;
+Você pode responder perguntas sobre:
+
+- último resultado;
+- último branco;
+- último vermelho;
+- último preto;
+- horário de determinada rodada;
+- número de determinada rodada;
+- quantidade total de rodadas;
+- quantidade de brancos;
+- quantidade de vermelhos;
+- quantidade de pretos;
+- porcentagens;
+- sequências;
+- maior sequência;
 - menor sequência;
 - frequências;
 - distribuição dos resultados;
-- outras estatísticas matemáticas diretamente calculáveis
-  a partir do histórico fornecido.
+- outras estatísticas diretamente calculáveis.
 
-REGRAS IMPORTANTES:
+REGRAS:
 
 1. Nunca invente dados.
 2. Nunca invente horários.
-3. Nunca diga que um resultado futuro é garantido.
-4. Nunca faça previsão do próximo resultado.
-5. Nunca forneça palpite de aposta.
-6. Nunca forneça estratégia de aposta.
-7. Nunca forneça gerenciamento de banca.
-8. Se os dados forem insuficientes, diga claramente.
-9. Responda em português.
-10. Seja direto e matemático.
+3. Nunca invente resultados.
+4. Use somente o JSON fornecido.
+5. Se o dado não estiver no histórico, diga que não está disponível.
+6. Nunca diga que um resultado futuro é garantido.
+7. Nunca faça previsão do próximo resultado.
+8. Nunca forneça palpite de aposta.
+9. Nunca forneça estratégia de aposta.
+10. Nunca forneça gerenciamento de banca.
+11. Responda em português.
+12. Seja direto.
+13. Quando perguntarem pelo último resultado de uma cor,
+    procure a ocorrência mais recente no histórico.
 """
 
+        # =================================================
+        # ENVIAR PARA GEMINI
+        # =================================================
+
         conteudo_envio = (
-            "HISTÓRICO RECENTE:\n"
+            "HISTÓRICO REAL DA DOUBLE:\n"
             f"{dados_blaze}\n\n"
             "PERGUNTA DO USUÁRIO:\n"
             f"{pergunta_usuario}"
         )
 
         print(
-            "ENVIANDO DADOS PARA GEMINI..."
+            "ENVIANDO HISTÓRICO PARA GEMINI..."
         )
-
-        # =================================================
-        # GEMINI
-        # =================================================
 
         resposta_gemini = client.models.generate_content(
             model="gemini-3.6-flash",
@@ -289,6 +462,10 @@ REGRAS IMPORTANTES:
         print(
             "GEMINI RESPONDEU COM SUCESSO"
         )
+
+        # =================================================
+        # RESPONDER TELEGRAM
+        # =================================================
 
         bot.reply_to(
             message,
@@ -319,31 +496,26 @@ REGRAS IMPORTANTES:
 
         print("========================================")
 
-        # =================================================
-        # MOSTRAR ERRO REAL NO TELEGRAM
-        # =================================================
-
         try:
 
             bot.reply_to(
                 message,
-                "❌ ERRO REAL:\n\n"
-                f"{type(erro).__name__}: "
+                "❌ Não consegui obter os dados da Double.\n\n"
+                f"Erro: {type(erro).__name__}: "
                 f"{str(erro)[:300]}"
             )
 
         except Exception:
 
             print(
-                "ERRO AO ENVIAR MENSAGEM "
-                "DE ERRO AO TELEGRAM"
+                "ERRO AO ENVIAR MENSAGEM DE ERRO"
             )
 
             traceback.print_exc()
 
 
 # =========================================================
-# WEBHOOK DO TELEGRAM
+# WEBHOOK
 # =========================================================
 
 @app.route(
@@ -393,7 +565,10 @@ def receber_webhook():
 # ROTA PRINCIPAL
 # =========================================================
 
-@app.route("/", methods=["GET"])
+@app.route(
+    "/",
+    methods=["GET"]
+)
 def home():
 
     return "Bot Online!", 200
@@ -467,7 +642,10 @@ if __name__ == "__main__":
 
     print("========================================")
     print("BOT INICIANDO...")
-    print("PORTA:", porta)
+    print(
+        "PORTA:",
+        porta
+    )
     print("========================================")
 
     app.run(
