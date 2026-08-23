@@ -2,6 +2,8 @@ import telebot
 import requests
 import json
 import os
+import threading
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 from datetime import datetime
 import google.generativeai as genai
 
@@ -13,7 +15,6 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 genai.configure(api_key=GEMINI_KEY)
 
 def puxar_dados_blaze():
-    # LINK CORRETO E COMPLETO COM A API
     url = "https://blaze1.space"
     try:
         resposta = requests.get(url)
@@ -47,6 +48,14 @@ def responder_usuario(message):
     resposta_gemini = model.generate_content(conteudo_envio)
     bot.reply_to(message, resposta_gemini.text)
 
+# Função para abrir a porta falsa que o Render exige
+def rodar_servidor_falso():
+    porta = int(os.environ.get("PORT", 10000))
+    servidor = HTTPServer(('0.0.0.0', porta), SimpleHTTPRequestHandler)
+    servidor.serve_forever()
+
 if __name__ == "__main__":
+    # Liga a porta em segundo plano e inicia o bot do Telegram
+    threading.Thread(target=rodar_servidor_falso, daemon=True).start()
     bot.polling()
     
