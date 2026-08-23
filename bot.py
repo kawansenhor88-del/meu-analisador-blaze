@@ -24,13 +24,24 @@ if not GEMINI_KEY:
     raise RuntimeError("ERRO: variável GEMINI_KEY não configurada.")
 
 
-# Telegram
+# =========================================================
+# TELEGRAM
+# =========================================================
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# Gemini - SDK NOVO
+
+# =========================================================
+# GEMINI
+# =========================================================
+
 client = genai.Client(api_key=GEMINI_KEY)
 
-# Flask
+
+# =========================================================
+# FLASK
+# =========================================================
+
 app = Flask(__name__)
 
 
@@ -39,9 +50,11 @@ app = Flask(__name__)
 # =========================================================
 
 def puxar_dados_blaze():
+
     url = "https://blaze1.space"
 
     try:
+
         print("BUSCANDO DADOS DA BLAZE...")
 
         resposta = requests.get(
@@ -60,13 +73,16 @@ def puxar_dados_blaze():
 
         if not isinstance(dados, list):
             raise ValueError(
-                f"Formato inesperado recebido da Blaze: {type(dados).__name__}"
+                f"Formato inesperado recebido da Blaze: "
+                f"{type(dados).__name__}"
             )
 
         historico = []
 
         for rodada in dados:
+
             try:
+
                 created_at = rodada.get("created_at")
                 color = rodada.get("color")
                 roll = rodada.get("roll")
@@ -74,7 +90,6 @@ def puxar_dados_blaze():
                 if not created_at:
                     continue
 
-                # Remove fração de segundos e possível Z
                 data_bruta = created_at.split(".")[0].replace("Z", "")
 
                 dt = datetime.strptime(
@@ -86,10 +101,13 @@ def puxar_dados_blaze():
 
                 if color == 0:
                     cor = "Branco"
+
                 elif color == 1:
                     cor = "Vermelho"
+
                 elif color == 2:
                     cor = "Preto"
+
                 else:
                     cor = f"Desconhecido ({color})"
 
@@ -100,10 +118,18 @@ def puxar_dados_blaze():
                 })
 
             except Exception as erro_rodada:
-                print("ERRO AO PROCESSAR RODADA:", erro_rodada)
+
+                print(
+                    "ERRO AO PROCESSAR RODADA:",
+                    erro_rodada
+                )
+
                 continue
 
-        print("RODADAS PROCESSADAS:", len(historico))
+        print(
+            "RODADAS PROCESSADAS:",
+            len(historico)
+        )
 
         return json.dumps(
             historico,
@@ -111,24 +137,31 @@ def puxar_dados_blaze():
         )
 
     except Exception as erro:
+
         print("========================================")
         print("ERRO AO BUSCAR DADOS DA BLAZE")
         print("========================================")
-        print(str(erro))
+        print("TIPO:", type(erro).__name__)
+        print("ERRO:", str(erro))
+
         traceback.print_exc()
 
-        return json.dumps({
-            "erro": "Não foi possível obter o histórico.",
-            "detalhes": str(erro)
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "erro": "Não foi possível obter o histórico.",
+                "detalhes": str(erro)
+            },
+            ensure_ascii=False
+        )
 
 
 # =========================================================
-# TELEGRAM
+# COMANDO /START
 # =========================================================
 
 @bot.message_handler(commands=["start"])
 def iniciar(message):
+
     print("COMANDO /START RECEBIDO")
 
     bot.reply_to(
@@ -137,6 +170,10 @@ def iniciar(message):
         "Envie uma pergunta sobre o histórico disponível."
     )
 
+
+# =========================================================
+# RECEBER MENSAGENS
+# =========================================================
 
 @bot.message_handler(func=lambda message: True)
 def responder_usuario(message):
@@ -148,29 +185,35 @@ def responder_usuario(message):
     print("========================================")
 
     try:
+
         pergunta_usuario = message.text or ""
 
-        # -------------------------------------------------
+        # =================================================
         # TESTE SIMPLES
-        # -------------------------------------------------
+        # =================================================
 
         if pergunta_usuario.strip().upper() == "TESTE 123":
+
             bot.reply_to(
                 message,
                 "✅ Telegram → Render → Bot está funcionando."
             )
-            print("TESTE 123 RESPONDIDO COM SUCESSO")
+
+            print(
+                "TESTE 123 RESPONDIDO COM SUCESSO"
+            )
+
             return
 
-        # -------------------------------------------------
+        # =================================================
         # BUSCAR HISTÓRICO
-        # -------------------------------------------------
+        # =================================================
 
         dados_blaze = puxar_dados_blaze()
 
-        # -------------------------------------------------
-        # INSTRUÇÃO PARA A IA
-        # -------------------------------------------------
+        # =================================================
+        # INSTRUÇÃO PARA IA
+        # =================================================
 
         instrucao_ia = """
 Você é um interpretador estatístico estrito.
@@ -194,8 +237,8 @@ Você pode informar:
 - menor sequência;
 - frequências;
 - distribuição dos resultados;
-- outras estatísticas matemáticas diretamente calculáveis a partir
-  do histórico fornecido.
+- outras estatísticas matemáticas diretamente calculáveis
+  a partir do histórico fornecido.
 
 REGRAS IMPORTANTES:
 
@@ -218,11 +261,13 @@ REGRAS IMPORTANTES:
             f"{pergunta_usuario}"
         )
 
-        print("ENVIANDO DADOS PARA GEMINI...")
+        print(
+            "ENVIANDO DADOS PARA GEMINI..."
+        )
 
-        # -------------------------------------------------
-        # GEMINI - API NOVA
-        # -------------------------------------------------
+        # =================================================
+        # GEMINI
+        # =================================================
 
         resposta_gemini = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -236,37 +281,64 @@ REGRAS IMPORTANTES:
         texto_resposta = resposta_gemini.text
 
         if not texto_resposta:
+
             raise RuntimeError(
                 "Gemini retornou uma resposta vazia."
             )
 
-        print("GEMINI RESPONDEU COM SUCESSO")
+        print(
+            "GEMINI RESPONDEU COM SUCESSO"
+        )
 
         bot.reply_to(
             message,
             texto_resposta
         )
 
-        print("RESPOSTA ENVIADA AO TELEGRAM")
+        print(
+            "RESPOSTA ENVIADA AO TELEGRAM"
+        )
 
     except Exception as erro:
 
         print("========================================")
         print("ERRO AO PROCESSAR MENSAGEM")
         print("========================================")
-        print("TIPO:", type(erro).__name__)
-        print("ERRO:", str(erro))
+
+        print(
+            "TIPO:",
+            type(erro).__name__
+        )
+
+        print(
+            "ERRO:",
+            str(erro)
+        )
+
         traceback.print_exc()
+
         print("========================================")
 
+        # =================================================
+        # MOSTRAR ERRO REAL NO TELEGRAM
+        # =================================================
+
         try:
+
             bot.reply_to(
                 message,
-                "❌ Ocorreu um erro ao processar sua solicitação.\n"
-                "Verifique os logs do servidor."
+                "❌ ERRO REAL:\n\n"
+                f"{type(erro).__name__}: "
+                f"{str(erro)[:300]}"
             )
+
         except Exception:
-            print("ERRO AO ENVIAR MENSAGEM DE ERRO AO TELEGRAM")
+
+            print(
+                "ERRO AO ENVIAR MENSAGEM "
+                "DE ERRO AO TELEGRAM"
+            )
+
             traceback.print_exc()
 
 
@@ -274,17 +346,25 @@ REGRAS IMPORTANTES:
 # WEBHOOK DO TELEGRAM
 # =========================================================
 
-@app.route("/" + TELEGRAM_TOKEN, methods=["POST"])
+@app.route(
+    "/" + TELEGRAM_TOKEN,
+    methods=["POST"]
+)
 def receber_webhook():
 
     try:
-        json_string = request.get_data().decode("utf-8")
+
+        json_string = request.get_data().decode(
+            "utf-8"
+        )
 
         update = telebot.types.Update.de_json(
             json_string
         )
 
-        bot.process_new_updates([update])
+        bot.process_new_updates(
+            [update]
+        )
 
         return "OK", 200
 
@@ -293,7 +373,17 @@ def receber_webhook():
         print("========================================")
         print("ERRO NO WEBHOOK")
         print("========================================")
-        print(str(erro))
+
+        print(
+            "TIPO:",
+            type(erro).__name__
+        )
+
+        print(
+            "ERRO:",
+            str(erro)
+        )
+
         traceback.print_exc()
 
         return "ERROR", 500
@@ -316,7 +406,10 @@ def home():
 if __name__ == "__main__":
 
     porta = int(
-        os.environ.get("PORT", 10000)
+        os.environ.get(
+            "PORT",
+            10000
+        )
     )
 
     hostname = os.environ.get(
@@ -324,6 +417,7 @@ if __name__ == "__main__":
     )
 
     if not hostname:
+
         raise RuntimeError(
             "RENDER_EXTERNAL_HOSTNAME não encontrado."
         )
@@ -335,21 +429,40 @@ if __name__ == "__main__":
     print("========================================")
     print("CONFIGURANDO WEBHOOK")
     print("========================================")
-    print("URL:", webhook_url)
+
+    print(
+        "URL:",
+        webhook_url
+    )
 
     try:
+
         bot.remove_webhook()
 
         bot.set_webhook(
             url=webhook_url
         )
 
-        print("WEBHOOK CONFIGURADO COM SUCESSO")
+        print(
+            "WEBHOOK CONFIGURADO COM SUCESSO"
+        )
 
     except Exception as erro:
 
-        print("ERRO AO CONFIGURAR WEBHOOK")
-        print(str(erro))
+        print(
+            "ERRO AO CONFIGURAR WEBHOOK"
+        )
+
+        print(
+            "TIPO:",
+            type(erro).__name__
+        )
+
+        print(
+            "ERRO:",
+            str(erro)
+        )
+
         traceback.print_exc()
 
     print("========================================")
@@ -360,4 +473,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=porta
-                    )
+    )
