@@ -9,375 +9,206 @@ from flask import Flask, request
 from google import genai
 from google.genai import types
 
-
-# =========================================================
+# ==============================================================================
 # CONFIGURAÇÕES
-# =========================================================
+# ==============================================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("ERRO: variável TELEGRAM_TOKEN não configurada.")
-
 if not GEMINI_KEY:
     raise RuntimeError("ERRO: variável GEMINI_KEY não configurada.")
 
-
-# =========================================================
+# ==============================================================================
 # TELEGRAM
-# =========================================================
-
+# ==============================================================================
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-
-# =========================================================
+# ==============================================================================
 # GEMINI
-# =========================================================
-
+# ==============================================================================
 client = genai.Client(api_key=GEMINI_KEY)
 
-
-# =========================================================
+# ==============================================================================
 # FLASK
-# =========================================================
-
+# ==============================================================================
 app = Flask(__name__)
 
-
-# =========================================================
-# BUSCAR HISTÓRICO REAL DA DOUBLE
-# =========================================================
-
+# ==============================================================================
+# BUSCAR HISTÓRICO REAL DA DOUBLE (TIPMINER)
+# ==============================================================================
 def puxar_dados_blaze():
-
     urls = [
-    "https://blaze.bet.br/api/singleplayer-originals/originals/roulette_games/recent/1"
+        "https://tipminer.com"
     ]
-
+    
     ultimo_erro = None
-
+    
     for url in urls:
-
         try:
-
-            print("========================================")
-            print("BUSCANDO HISTÓRICO REAL DA DOUBLE")
+            print("=========================================")
+            print("BUSCANDO HISTÓRICO REAL DA DOUBLE (TIPMINER)")
             print("URL:", url)
-            print("========================================")
-
+            print("=========================================")
+            
             resposta = requests.get(
                 url,
                 timeout=15,
                 headers={
-                    "User-Agent": "Mozilla/5.0",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Accept": "application/json",
-                    "Referer": "https://blaze.com/"
+                    "Origin": "https://tipminer.com",
+                    "Referer": "https://tipminer.com/"
                 }
             )
-
-            print(
-                "STATUS BLAZE:",
-                resposta.status_code
-            )
-
-            print(
-                "CONTENT-TYPE:",
-                resposta.headers.get("Content-Type")
-            )
-
-            print(
-                "TAMANHO DA RESPOSTA:",
-                len(resposta.text)
-            )
-
+            
+            print("STATUS TIPMINER:", resposta.status_code)
+            print("CONTENT-TYPE:", resposta.headers.get("Content-Type"))
+            print("TAMANHO DA RESPOSTA:", len(resposta.text))
+            
             resposta.raise_for_status()
-
-            # =================================================
+            
+            # ------------------------------------------------------------------
             # CONVERTER RESPOSTA PARA JSON
-            # =================================================
-
+            # ------------------------------------------------------------------
             try:
-
-                dados = resposta.json()
-
+                dados_brutos = resposta.json()
+                
+                # Trata possíveis variações de encapsulamento da API do TipMiner
+                if isinstance(dados_brutos, dict) and "rounds" in dados_brutos:
+                    dados = dados_brutos["rounds"]
+                elif isinstance(dados_brutos, dict) and "data" in dados_brutos:
+                    dados = dados_brutos["data"]
+                else:
+                    dados = dados_brutos
             except Exception as erro_json:
-
-                print("========================================")
+                print("=========================================")
                 print("A RESPOSTA NÃO É JSON")
-                print("========================================")
-
-                print(
-                    "TIPO:",
-                    type(erro_json).__name__
-                )
-
-                print(
-                    "ERRO:",
-                    str(erro_json)
-                )
-
-                print(
-                    "RESPOSTA:",
-                    resposta.text[:1000]
-                )
-
+                print("=========================================")
                 raise
-
-            # =================================================
+            
             # VERIFICAR FORMATO
-            # =================================================
-
             if not isinstance(dados, list):
-
-                raise ValueError(
-                    "A API retornou um formato inesperado: "
-                    f"{type(dados).__name__}"
-                )
-
+                raise ValueError(f"A API retornou um formato inesperado: {type(dados).__name__}")
+                
             if len(dados) == 0:
-
-                raise ValueError(
-                    "A API respondeu, mas não retornou nenhuma rodada."
-                )
-
+                raise ValueError("A API respondeu, mas não retornou nenhuma rodada.")
+                
             historico = []
-
-            # =================================================
+            
+            # ------------------------------------------------------------------
             # PROCESSAR RODADAS
-            # =================================================
-
+            # ------------------------------------------------------------------
             for rodada in dados:
-
                 try:
-
-                    created_at = rodada.get("created_at")
+                    created_at = rodada.get("created_at") or rodada.get("createdAt")
                     color = rodada.get("color")
-                    roll = rodada.get("roll")
-
-                    if not created_at:
+                    roll = rodada.get("roll") or rodada.get("result")
+                    
+                    if not created_at or color is None or roll is None:
                         continue
-
-                    if color is None:
-                        continue
-
-                    if roll is None:
-                        continue
-
-                    # =================================================
+                        
                     # CONVERTER DATA
-                    # =================================================
-
-                    data_texto = created_at.replace(
-                        "Z",
-                        "+00:00"
-                    )
-
-                    dt = datetime.fromisoformat(
-                        data_texto
-                    )
-
-                    # =================================================
+                    data_texto = created_at.replace("Z", "+00:00")
+                    dt = datetime.fromisoformat(data_texto)
+                    
                     # CONVERTER UTC PARA HORÁRIO DE BRASÍLIA
-                    # =================================================
-
                     if dt.tzinfo is not None:
-
-                        dt_brasilia = dt.astimezone(
-                            timezone(
-                                timedelta(hours=-3)
-                            )
-                        )
-
+                        dt_brasilia = dt.astimezone(timezone(timedelta(hours=-3)))
                     else:
-
                         dt_brasilia = dt
-
-                    horario = dt_brasilia.strftime(
-                        "%H:%M:%S"
-                    )
-
-                    # =================================================
+                        
+                    horario = dt_brasilia.strftime("%H:%M:%S")
+                    
                     # CONVERTER COR
-                    # =================================================
-
-                    if color == 0:
-
+                    cor_str = str(color).lower()
+                    if cor_str in ["0", "white", "branco"]:
                         cor = "Branco"
-
-                    elif color == 1:
-
+                    elif cor_str in ["1", "red", "vermelho"]:
                         cor = "Vermelho"
-
-                    elif color == 2:
-
+                    elif cor_str in ["2", "black", "preto"]:
                         cor = "Preto"
-
                     else:
-
                         cor = f"Desconhecido ({color})"
-
-                    # =================================================
-                    # ADICIONAR AO HISTÓRICO
-                    # =================================================
-
-                    historico.append(
-                        {
-                            "tempo": horario,
-                            "resultado": cor,
-                            "numero": roll
-                        }
-                    )
-
+                        
+                    historico.append({
+                        "tempo": horario,
+                        "resultado": cor,
+                        "numero": roll
+                    })
                 except Exception as erro_rodada:
-
-                    print(
-                        "ERRO AO PROCESSAR RODADA:",
-                        str(erro_rodada)
-                    )
-
+                    print("ERRO AO PROCESSAR RODADA:", str(erro_rodada))
                     continue
-
-            # =================================================
+                    
             # VERIFICAR RESULTADO FINAL
-            # =================================================
-
             if not historico:
-
-                raise ValueError(
-                    "A API respondeu, mas nenhuma rodada "
-                    "pôde ser processada."
-                )
-
-            print("========================================")
-            print(
-                "RODADAS RECEBIDAS:",
-                len(historico)
-            )
-
-            print(
-                "RODADA MAIS RECENTE:",
-                historico[0]
-            )
-
-            print(
-                "RODADA MAIS ANTIGA:",
-                historico[-1]
-            )
-
-            print("========================================")
-
-            return json.dumps(
-                historico,
-                ensure_ascii=False
-            )
-
+                raise ValueError("A API respondeu, mas nenhuma rodada pôde ser processada.")
+                
+            print("=========================================")
+            print("RODADAS RECEBIDAS:", len(historico))
+            print("RODADA MAIS RECENTE:", historico[0])
+            print("RODADA MAIS ANTIGA:", historico[-1])
+            print("=========================================")
+            
+            return json.dumps(historico, ensure_ascii=False)
+            
         except Exception as erro:
-
             ultimo_erro = erro
-
-            print("========================================")
+            print("=========================================")
             print("FALHA AO BUSCAR NESTA URL")
             print("TIPO:", type(erro).__name__)
             print("ERRO:", str(erro))
-            print("========================================")
-
+            print("=========================================")
             continue
-
-    # =========================================================
+            
     # TODAS AS FONTES FALHARAM
-    # =========================================================
+    raise RuntimeError(f"Não foi possível obter o histórico real da Double. Último erro: {ultimo_erro}")
 
-    raise RuntimeError(
-        "Não foi possível obter o histórico real da Double. "
-        f"Último erro: {ultimo_erro}"
-    )
-
-
-# =========================================================
+# ==============================================================================
 # COMANDO /START
-# =========================================================
-
+# ==============================================================================
 @bot.message_handler(commands=["start"])
 def iniciar(message):
-
     print("COMANDO /START RECEBIDO")
-
     bot.reply_to(
         message,
-        "🤖 Bot online!\n\n"
-        "Envie uma pergunta sobre o histórico da Double."
+        "🤖 Bot online!\n\nEnvie uma pergunta sobre o histórico da Double."
     )
 
-
-# =========================================================
+# ==============================================================================
 # RECEBER MENSAGENS
-# =========================================================
-
+# ==============================================================================
 @bot.message_handler(func=lambda message: True)
 def responder_usuario(message):
-
-    print("========================================")
+    print("=========================================")
     print("NOVA MENSAGEM RECEBIDA")
-
-    print(
-        "USUÁRIO:",
-        message.from_user.id
-    )
-
-    print(
-        "MENSAGEM:",
-        message.text
-    )
-
-    print("========================================")
-
+    print("USUÁRIO:", message.from_user.id)
+    print("MENSAGEM:", message.text)
+    print("=========================================")
+    
     try:
-
         pergunta_usuario = message.text or ""
-
-        # =================================================
+        
         # TESTE DO TELEGRAM
-        # =================================================
-
         if pergunta_usuario.strip().upper() == "TESTE 123":
-
             bot.reply_to(
                 message,
-                "✅ Telegram → Render → Bot está funcionando."
+                "✅ Telegram - Render - Bot está funcionando."
             )
-
-            print(
-                "TESTE 123 RESPONDIDO COM SUCESSO"
-            )
-
+            print("TESTE 123 RESPONDIDO COM SUCESSO")
             return
-
-        # =================================================
+            
         # BUSCAR DADOS REAIS
-        # =================================================
-
-        print(
-            "BUSCANDO HISTÓRICO REAL..."
-        )
-
+        print("BUSCANDO HISTÓRICO REAL...")
         dados_blaze = puxar_dados_blaze()
-
-        print(
-            "DADOS RECEBIDOS COM SUCESSO."
-        )
-
-        print(
-            dados_blaze[:2000]
-        )
-
-        # =================================================
+        print("DADOS RECEBIDOS COM SUCESSO.")
+        print(dados_blaze[:2000])
+        
         # INSTRUÇÃO PARA GEMINI
-        # =================================================
-
         instrucao_ia = """
 Você é um interpretador estatístico estrito.
-
 Analise SOMENTE o histórico JSON fornecido.
 
 Cada rodada possui:
@@ -385,22 +216,20 @@ Cada rodada possui:
 - resultado
 - numero
 
-O histórico está ordenado da rodada mais recente
-para a mais antiga.
+O histórico está ordenado da rodada mais recente para a mais antiga.
 
 Você pode responder perguntas sobre:
-
-- último resultado;
-- último branco;
-- último vermelho;
-- último preto;
+- Último resultado;
+- Último branco;
+- Último vermelho;
+- Último preto;
 - horário de determinada rodada;
 - número de determinada rodada;
 - quantidade total de rodadas;
 - quantidade de brancos;
 - quantidade de vermelhos;
 - quantidade de pretos;
-- porcentagens;
+- percentuais;
 - sequências;
 - maior sequência;
 - menor sequência;
@@ -409,7 +238,6 @@ Você pode responder perguntas sobre:
 - outras estatísticas diretamente calculáveis.
 
 REGRAS:
-
 1. Nunca invente dados.
 2. Nunca invente horários.
 3. Nunca invente resultados.
@@ -422,232 +250,14 @@ REGRAS:
 10. Nunca forneça gerenciamento de banca.
 11. Responda em português.
 12. Seja direto.
-13. Quando perguntarem pelo último resultado de uma cor,
-    procure a ocorrência mais recente no histórico.
+13. Quando perguntarem pelo último resultado de uma cor, procure a ocorrência mais recente no histórico.
 """
-
-        # =================================================
+        
         # ENVIAR PARA GEMINI
-        # =================================================
-
         conteudo_envio = (
-            "HISTÓRICO REAL DA DOUBLE:\n"
-            f"{dados_blaze}\n\n"
-            "PERGUNTA DO USUÁRIO:\n"
-            f"{pergunta_usuario}"
+            f"HISTÓRICO REAL DA DOUBLE:\n{dados_blaze}\n\n"
+            f"PERGUNTA DO USUÁRIO:\n{pergunta_usuario}"
         )
+        
+        print("ENVIANDO HISTÓRICO PARA GEMINI...")
 
-        print(
-            "ENVIANDO HISTÓRICO PARA GEMINI..."
-        )
-
-        resposta_gemini = client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=conteudo_envio,
-            config=types.GenerateContentConfig(
-                system_instruction=instrucao_ia,
-                temperature=0.1
-            )
-        )
-
-        texto_resposta = resposta_gemini.text
-
-        if not texto_resposta:
-
-            raise RuntimeError(
-                "Gemini retornou uma resposta vazia."
-            )
-
-        print(
-            "GEMINI RESPONDEU COM SUCESSO"
-        )
-
-        # =================================================
-        # RESPONDER TELEGRAM
-        # =================================================
-
-        bot.reply_to(
-            message,
-            texto_resposta
-        )
-
-        print(
-            "RESPOSTA ENVIADA AO TELEGRAM"
-        )
-
-    except Exception as erro:
-
-        print("========================================")
-        print("ERRO AO PROCESSAR MENSAGEM")
-        print("========================================")
-
-        print(
-            "TIPO:",
-            type(erro).__name__
-        )
-
-        print(
-            "ERRO:",
-            str(erro)
-        )
-
-        traceback.print_exc()
-
-        print("========================================")
-
-        try:
-
-            bot.reply_to(
-                message,
-                "❌ Não consegui obter os dados da Double.\n\n"
-                f"Erro: {type(erro).__name__}: "
-                f"{str(erro)[:300]}"
-            )
-
-        except Exception:
-
-            print(
-                "ERRO AO ENVIAR MENSAGEM DE ERRO"
-            )
-
-            traceback.print_exc()
-
-
-# =========================================================
-# WEBHOOK
-# =========================================================
-
-@app.route(
-    "/" + TELEGRAM_TOKEN,
-    methods=["POST"]
-)
-def receber_webhook():
-
-    try:
-
-        json_string = request.get_data().decode(
-            "utf-8"
-        )
-
-        update = telebot.types.Update.de_json(
-            json_string
-        )
-
-        bot.process_new_updates(
-            [update]
-        )
-
-        return "OK", 200
-
-    except Exception as erro:
-
-        print("========================================")
-        print("ERRO NO WEBHOOK")
-        print("========================================")
-
-        print(
-            "TIPO:",
-            type(erro).__name__
-        )
-
-        print(
-            "ERRO:",
-            str(erro)
-        )
-
-        traceback.print_exc()
-
-        return "ERROR", 500
-
-
-# =========================================================
-# ROTA PRINCIPAL
-# =========================================================
-
-@app.route(
-    "/",
-    methods=["GET"]
-)
-def home():
-
-    return "Bot Online!", 200
-
-
-# =========================================================
-# INICIALIZAÇÃO
-# =========================================================
-
-if __name__ == "__main__":
-
-    porta = int(
-        os.environ.get(
-            "PORT",
-            10000
-        )
-    )
-
-    hostname = os.environ.get(
-        "RENDER_EXTERNAL_HOSTNAME"
-    )
-
-    if not hostname:
-
-        raise RuntimeError(
-            "RENDER_EXTERNAL_HOSTNAME não encontrado."
-        )
-
-    webhook_url = (
-        f"https://{hostname}/{TELEGRAM_TOKEN}"
-    )
-
-    print("========================================")
-    print("CONFIGURANDO WEBHOOK")
-    print("========================================")
-
-    print(
-        "URL:",
-        webhook_url
-    )
-
-    try:
-
-        bot.remove_webhook()
-
-        bot.set_webhook(
-            url=webhook_url
-        )
-
-        print(
-            "WEBHOOK CONFIGURADO COM SUCESSO"
-        )
-
-    except Exception as erro:
-
-        print(
-            "ERRO AO CONFIGURAR WEBHOOK"
-        )
-
-        print(
-            "TIPO:",
-            type(erro).__name__
-        )
-
-        print(
-            "ERRO:",
-            str(erro)
-        )
-
-        traceback.print_exc()
-
-    print("========================================")
-    print("BOT INICIANDO...")
-    print(
-        "PORTA:",
-        porta
-    )
-    print("========================================")
-
-    app.run(
-        host="0.0.0.0",
-        port=porta
-        )
