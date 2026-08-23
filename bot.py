@@ -260,6 +260,6 @@ REGRAS:
             system_instruction=instrucao_ia
         )
         
+        # PARÊNTESE FECHADO CORRETAMENTE AQUI:
         resposta_gemini = model.generate_content(
-            conteudo_envio,
         
