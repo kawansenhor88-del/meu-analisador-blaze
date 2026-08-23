@@ -52,8 +52,7 @@ app = Flask(__name__)
 def puxar_dados_blaze():
 
     urls = [
-        "https://blaze.com/api/singleplayer-originals/originals/roulette_games/recent/1",
-        "https://blaze.com/api/roulette_games/recent"
+    "https://blaze.bet.br/api/singleplayer-originals/originals/roulette_games/recent/1"
     ]
 
     ultimo_erro = None
