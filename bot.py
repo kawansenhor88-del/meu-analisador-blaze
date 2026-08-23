@@ -39,7 +39,7 @@ def responder_usuario(message):
         "É EXPRESSAMENTE PROIBIDO dar palpites de apostas, dicas de gerenciamento ou conselhos. Seja frio, direto e matemático."
     )
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
+        model_name="gemini-2.5-flash",
         system_instruction=instrucao_ia
     )
     conteudo_envio = f"Histórico Recente da Blaze: {dados_blaze}\n\nPergunta do usuário: {pergunta_usuario}"
