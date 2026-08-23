@@ -148,8 +148,8 @@ def puxar_dados_blaze():
                 
             print("=========================================")
             print("RODADAS RECEBIDAS:", len(historico))
-            print("RODADA MAIS RECENTE:", historico[0])
-            print("RODADA MAIS ANTIGA:", historico[-1])
+            print("RODADA MAIS RECENTE:", historico[0] if historico else 'Nenhuma')
+            print("RODADA MAIS ANTIGA:", historico[-1] if historico else 'Nenhuma')
             print("=========================================")
             
             return json.dumps(historico, ensure_ascii=False)
@@ -256,8 +256,4 @@ REGRAS:
         # ENVIAR PARA GEMINI
         conteudo_envio = (
             f"HISTÓRICO REAL DA DOUBLE:\n{dados_blaze}\n\n"
-            f"PERGUNTA DO USUÁRIO:\n{pergunta_usuario}"
-        )
-        
-        print("ENVIANDO HISTÓRICO PARA GEMINI...")
-
+                    
