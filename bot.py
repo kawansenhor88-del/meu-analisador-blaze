@@ -2,8 +2,7 @@ import telebot
 import requests
 import json
 import os
-import threading
-from http.server import SimpleHTTPRequestHandler, HTTPServer
+from flask import Flask, request
 from datetime import datetime
 import google.generativeai as genai
 
@@ -13,6 +12,8 @@ GEMINI_KEY = os.environ.get("GEMINI_KEY")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 genai.configure(api_key=GEMINI_KEY)
+
+app = Flask(__name__)
 
 def puxar_dados_blaze():
     url = "https://blaze1.space"
@@ -48,11 +49,23 @@ def responder_usuario(message):
     resposta_gemini = model.generate_content(conteudo_envio)
     bot.reply_to(message, resposta_gemini.text)
 
-def rodar_servidor_falso():
-    porta = int(os.environ.get("PORT", 10000))
-    servidor = HTTPServer(('0.0.0.0', porta), SimpleHTTPRequestHandler)
-    servidor.serve_forever()
+# Rota para receber as mensagens do Telegram
+@app.route('/' + TELEGRAM_TOKEN, methods=['POST'])
+def getMessage():
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return "!", 200
+
+@app.route("/")
+def webhook():
+    bot.remove_webhook()
+    # Pega o link do Render automaticamente
+    url_render = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{TELEGRAM_TOKEN}"
+    bot.set_webhook(url=url_render)
+    return "Bot Online!", 200
 
 if __name__ == "__main__":
-    threading.Thread(target=rodar_servidor_falso, daemon=True).start()
-    bot.polling()
+    porta = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=porta)
+    
