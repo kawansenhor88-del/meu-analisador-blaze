@@ -19,9 +19,8 @@ def puxar_dados_blaze():
         dados = resposta.json()
         historico = []
         for rodada in dados:
-            # Pega o horario e deixa no padrao brasileiro
-            data_bruta = rodada['created_at'].split(".")[0]
-            dt = datetime.strptime(data_bruta, "%Y-%m-%dT%H:%M:%S")
+            data_bruta = rodada['created_at'].split(".")
+            dt = datetime.strptime(data_bruta[0], "%Y-%m-%dT%H:%M:%S")
             horario_formatado = dt.strftime("%H:%M:%S")
             cor = "Branco" if rodada['color'] == 0 else ("Vermelho" if rodada['color'] == 1 else "Preto")
             historico.append({"tempo": horario_formatado, "resultado": cor, "numero": rodada['roll']})
@@ -49,3 +48,4 @@ def responder_usuario(message):
 
 if __name__ == "__main__":
     bot.polling()
+    
