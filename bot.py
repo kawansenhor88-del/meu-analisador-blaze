@@ -15,7 +15,6 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 genai.configure(api_key=GEMINI_KEY)
 
 def puxar_dados_blaze():
-    # LINK DEFINITIVO E COMPLETO COM A API DA BLAZE
     url = "https://blaze1.space"
     try:
         resposta = requests.get(url)
@@ -49,7 +48,6 @@ def responder_usuario(message):
     resposta_gemini = model.generate_content(conteudo_envio)
     bot.reply_to(message, resposta_gemini.text)
 
-# Função para manter o Render ativo de graça
 def rodar_servidor_falso():
     porta = int(os.environ.get("PORT", 10000))
     servidor = HTTPServer(('0.0.0.0', porta), SimpleHTTPRequestHandler)
@@ -58,4 +56,3 @@ def rodar_servidor_falso():
 if __name__ == "__main__":
     threading.Thread(target=rodar_servidor_falso, daemon=True).start()
     bot.polling()
-    
