@@ -270,7 +270,7 @@ REGRAS IMPORTANTES:
         # =================================================
 
         resposta_gemini = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=conteudo_envio,
             config=types.GenerateContentConfig(
                 system_instruction=instrucao_ia,
