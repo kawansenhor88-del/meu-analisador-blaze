@@ -6,8 +6,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 import telebot
 from flask import Flask, request
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 
 # ==============================================================================
 # CONFIGURAÇÕES
@@ -27,9 +26,9 @@ if not GEMINI_KEY:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 # ==============================================================================
-# GEMINI
+# GEMINI (BIBLIOTECA TRADICIONAL COMPATÍVEL)
 # ==============================================================================
-client = genai.Client(api_key=GEMINI_KEY)
+genai.configure(api_key=GEMINI_KEY)
 
 # ==============================================================================
 # FLASK
@@ -76,7 +75,6 @@ def puxar_dados_blaze():
             try:
                 dados_brutos = resposta.json()
                 
-                # Trata possíveis variações de encapsulamento da API do TipMiner
                 if isinstance(dados_brutos, dict) and "rounds" in dados_brutos:
                     dados = dados_brutos["rounds"]
                 elif isinstance(dados_brutos, dict) and "data" in dados_brutos:
@@ -148,8 +146,6 @@ def puxar_dados_blaze():
                 
             print("=========================================")
             print("RODADAS RECEBIDAS:", len(historico))
-            print("RODADA MAIS RECENTE:", historico[0] if historico else 'Nenhuma')
-            print("RODADA MAIS ANTIGA:", historico[-1] if historico else 'Nenhuma')
             print("=========================================")
             
             return json.dumps(historico, ensure_ascii=False)
@@ -163,7 +159,6 @@ def puxar_dados_blaze():
             print("=========================================")
             continue
             
-    # TODAS AS FONTES FALHARAM
     raise RuntimeError(f"Não foi possível obter o histórico real da Double. Último erro: {ultimo_erro}")
 
 # ==============================================================================
@@ -204,7 +199,6 @@ def responder_usuario(message):
         print("BUSCANDO HISTÓRICO REAL...")
         dados_blaze = puxar_dados_blaze()
         print("DADOS RECEBIDOS COM SUCESSO.")
-        print(dados_blaze[:2000])
         
         # INSTRUÇÃO PARA GEMINI
         instrucao_ia = """
@@ -256,4 +250,15 @@ REGRAS:
         # ENVIAR PARA GEMINI
         conteudo_envio = (
             f"HISTÓRICO REAL DA DOUBLE:\n{dados_blaze}\n\n"
-                    
+            f"PERGUNTA DO USUÁRIO:\n{pergunta_usuario}"
+        )
+        
+        print("ENVIANDO HISTÓRICO PARA GEMINI...")
+        
+        # CONFIGURAÇÃO DO MODELO COM A BIBLIOTECA PADRÃO
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=instrucao_ia
+        )
+
+        
