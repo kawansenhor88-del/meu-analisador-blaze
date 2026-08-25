@@ -1,6 +1,0 @@
-requests
-pyTelegramBotAPI
-Flask
-google-genai
-psycopg2-binary
-gunicorn
