@@ -22,9 +22,15 @@ GEMINI_KEY = os.environ.get("GEMINI_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 TIPMINER_SSE_URL = (
-    "https://api.core.public.tipminer.com/v1/double/"
-    "rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/live"
+    "https://api.core.public.tipminer.com/"
+    "v1/double/rounds/"
+    "6ee2f33f-7dbf-40ae-b01c-b05368c806ba/live"
 )
+
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+
+PORT = int(os.environ.get("PORT", "10000"))
+
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("ERRO: variável TELEGRAM_TOKEN não configurada.")
@@ -75,7 +81,6 @@ def converter_horario(valor):
         return None
 
     try:
-
         texto = str(valor)
 
         if texto.endswith("Z"):
@@ -84,17 +89,13 @@ def converter_horario(valor):
         dt = datetime.fromisoformat(texto)
 
         if dt.tzinfo is not None:
-
             dt = dt.astimezone(
-                timezone(
-                    timedelta(hours=-3)
-                )
+                timezone(timedelta(hours=-3))
             )
 
         return dt.strftime("%H:%M:%S")
 
     except Exception:
-
         return str(valor)
 
 
@@ -108,7 +109,6 @@ def converter_cor(valor):
         return None
 
     try:
-
         numero = int(valor)
 
         if numero == 0:
@@ -154,43 +154,24 @@ def adicionar_rodada(payload):
         return False
 
     resultado = payload.get("result")
-
     instant = payload.get("instant")
-
     color = payload.get("color")
-
     roll = payload.get("roll")
 
-    # --------------------------------------------------------------------------
-    # Se houver objeto interno, tentar localizar os dados
-    # --------------------------------------------------------------------------
-
     if resultado is None:
-
         resultado = payload.get("value")
 
     if instant is None:
-
         instant = payload.get("created_at")
 
     if color is None:
-
         color = payload.get("colour")
 
     if roll is None:
-
         roll = payload.get("number")
-
-    # --------------------------------------------------------------------------
-    # Sem resultado não temos uma rodada
-    # --------------------------------------------------------------------------
 
     if resultado is None and color is None and roll is None:
         return False
-
-    # --------------------------------------------------------------------------
-    # Identificador para evitar duplicação
-    # --------------------------------------------------------------------------
 
     rodada_id = (
         payload.get("id")
@@ -205,10 +186,6 @@ def adicionar_rodada(payload):
         if rodada_id == ultima_rodada_id:
             return False
 
-    # --------------------------------------------------------------------------
-    # Determinar resultado
-    # --------------------------------------------------------------------------
-
     valor_cor = color
 
     if valor_cor is None:
@@ -216,27 +193,16 @@ def adicionar_rodada(payload):
 
     cor = converter_cor(valor_cor)
 
-    # --------------------------------------------------------------------------
-    # Número
-    # --------------------------------------------------------------------------
-
     numero = roll
 
     if numero is None:
         numero = resultado
 
-    # --------------------------------------------------------------------------
-    # Horário
-    # --------------------------------------------------------------------------
-
     horario = converter_horario(instant)
 
     if horario is None:
-
         horario = datetime.now(
-            timezone(
-                timedelta(hours=-3)
-            )
+            timezone(timedelta(hours=-3))
         ).strftime("%H:%M:%S")
 
     rodada = {
@@ -247,13 +213,8 @@ def adicionar_rodada(payload):
         "tipo": "DOUBLE"
     }
 
-    # --------------------------------------------------------------------------
-    # Salvar
-    # --------------------------------------------------------------------------
-
     with historico_lock:
 
-        # Evitar duplicação por conteúdo
         if historico_double:
 
             ultima = historico_double[0]
@@ -310,7 +271,6 @@ def processar_evento_sse(evento):
                 dados_json.append(conteudo)
 
     if not dados_json:
-
         return
 
     texto_json = "\n".join(dados_json)
@@ -335,57 +295,58 @@ def processar_evento_sse(evento):
         )[:3000]
     )
 
-    # --------------------------------------------------------------------------
-    # Evento pode ser diretamente um DOUBLE
-    # --------------------------------------------------------------------------
+    if not isinstance(payload, dict):
+        return
 
-    if isinstance(payload, dict):
+    # Evento heartbeat
+    if payload.get("type") == "heartbeat":
+        print("HEARTBEAT RECEBIDO")
+        return
 
-        if payload.get("type") == "DOUBLE":
+    # Evento DOUBLE diretamente
+    if payload.get("type") == "DOUBLE":
 
-            adicionar_rodada(payload)
+        adicionar_rodada(payload)
+
+        return
+
+    # Dados dentro de "data"
+    dados = payload.get("data")
+
+    if isinstance(dados, dict):
+
+        if dados.get("type") == "heartbeat":
+            print("HEARTBEAT RECEBIDO")
+            return
+
+        if dados.get("type") == "DOUBLE":
+
+            adicionar_rodada(dados)
 
             return
 
-        # ----------------------------------------------------------------------
-        # Algumas transmissões podem colocar os dados dentro de "data"
-        # ----------------------------------------------------------------------
-
-        dados = payload.get("data")
-
-        if isinstance(dados, dict):
-
-            if dados.get("type") == "DOUBLE":
-
-                adicionar_rodada(dados)
-
-                return
-
-            if (
-                "result" in dados
-                or "color" in dados
-                or "roll" in dados
-            ):
-
-                dados["type"] = "DOUBLE"
-
-                adicionar_rodada(dados)
-
-                return
-
-        # ----------------------------------------------------------------------
-        # Evento pode ter resultado diretamente
-        # ----------------------------------------------------------------------
-
         if (
-            "result" in payload
-            or "color" in payload
-            or "roll" in payload
+            "result" in dados
+            or "color" in dados
+            or "roll" in dados
         ):
 
-            payload["type"] = "DOUBLE"
+            dados["type"] = "DOUBLE"
 
-            adicionar_rodada(payload)
+            adicionar_rodada(dados)
+
+            return
+
+    # Resultado diretamente no payload
+    if (
+        "result" in payload
+        or "color" in payload
+        or "roll" in payload
+    ):
+
+        payload["type"] = "DOUBLE"
+
+        adicionar_rodada(payload)
 
 
 # ==============================================================================
@@ -444,10 +405,6 @@ def capturar_tipminer():
                 if linha is None:
                     continue
 
-                # --------------------------------------------------------------
-                # Linha vazia encerra um evento SSE
-                # --------------------------------------------------------------
-
                 if linha == "":
 
                     if evento_atual:
@@ -460,15 +417,7 @@ def capturar_tipminer():
 
                     continue
 
-                # --------------------------------------------------------------
-                # Guardar linha
-                # --------------------------------------------------------------
-
                 evento_atual.append(linha)
-
-            # ------------------------------------------------------------------
-            # Processar último evento caso conexão encerre sem linha vazia
-            # ------------------------------------------------------------------
 
             if evento_atual:
 
@@ -492,6 +441,7 @@ def capturar_tipminer():
 
                 try:
                     resposta.close()
+
                 except Exception:
                     pass
 
@@ -503,7 +453,7 @@ def capturar_tipminer():
 
 
 # ==============================================================================
-# INICIAR CAPTURADOR EM SEGUNDO PLANO
+# INICIAR CAPTURADOR
 # ==============================================================================
 
 def iniciar_capturador():
@@ -515,9 +465,7 @@ def iniciar_capturador():
 
     thread.start()
 
-    print(
-        "THREAD DO TIPMINER INICIADA."
-    )
+    print("THREAD DO TIPMINER INICIADA.")
 
 
 # ==============================================================================
@@ -585,10 +533,6 @@ def responder_usuario(message):
 
         pergunta_usuario = message.text or ""
 
-        # ----------------------------------------------------------------------
-        # TESTE TELEGRAM
-        # ----------------------------------------------------------------------
-
         if pergunta_usuario.strip().upper() == "TESTE 123":
 
             bot.reply_to(
@@ -601,10 +545,6 @@ def responder_usuario(message):
             )
 
             return
-
-        # ----------------------------------------------------------------------
-        # HISTÓRICO TIPMINER
-        # ----------------------------------------------------------------------
 
         print(
             "OBTENDO HISTÓRICO DO TIPMINER..."
@@ -619,10 +559,6 @@ def responder_usuario(message):
         print(
             dados_double[:5000]
         )
-
-        # ----------------------------------------------------------------------
-        # INSTRUÇÃO GEMINI
-        # ----------------------------------------------------------------------
 
         instrucao_ia = """
 Você é um interpretador estatístico estrito.
@@ -673,12 +609,8 @@ REGRAS:
 11. Responda em português.
 12. Seja direto.
 13. Quando perguntarem pelo último resultado de uma cor,
-    procure a ocorrência mais recente no histórico.
+procure a ocorrência mais recente no histórico.
 """
-
-        # ----------------------------------------------------------------------
-        # ENVIAR PARA GEMINI
-        # ----------------------------------------------------------------------
 
         conteudo_envio = (
             "HISTÓRICO REAL DA DOUBLE CAPTURADO PELO TIPMINER:\n"
@@ -711,10 +643,6 @@ REGRAS:
         print(
             "GEMINI RESPONDEU COM SUCESSO"
         )
-
-        # ----------------------------------------------------------------------
-        # RESPONDER TELEGRAM
-        # ----------------------------------------------------------------------
 
         bot.reply_to(
             message,
@@ -754,7 +682,7 @@ REGRAS:
 
 
 # ==============================================================================
-# WEBHOOK
+# WEBHOOK DO TELEGRAM
 # ==============================================================================
 
 @app.route(
@@ -803,3 +731,74 @@ def receber_webhook():
 def home():
 
     return "Bot Online!"
+
+
+# ==============================================================================
+# CONFIGURAR WEBHOOK
+# ==============================================================================
+
+def configurar_webhook():
+
+    if not RENDER_EXTERNAL_URL:
+
+        print("RENDER_EXTERNAL_URL não encontrada.")
+        print("Webhook não configurado automaticamente.")
+
+        return
+
+    webhook_url = (
+        RENDER_EXTERNAL_URL.rstrip("/")
+        + "/"
+        + TELEGRAM_TOKEN
+    )
+
+    try:
+
+        bot.remove_webhook()
+
+        time.sleep(1)
+
+        sucesso = bot.set_webhook(
+            url=webhook_url
+        )
+
+        print("========================================")
+        print("WEBHOOK TELEGRAM")
+        print("URL:", webhook_url)
+        print("RESULTADO:", sucesso)
+        print("========================================")
+
+    except Exception as erro:
+
+        print("ERRO AO CONFIGURAR WEBHOOK:")
+        print(type(erro).__name__)
+        print(str(erro))
+
+        traceback.print_exc()
+
+
+# ==============================================================================
+# INICIALIZAÇÃO DO SERVIDOR
+# ==============================================================================
+
+if __name__ == "__main__":
+
+    print("========================================")
+    print("INICIANDO BOT DOUBLE")
+    print("========================================")
+
+    iniciar_capturador()
+
+    configurar_webhook()
+
+    print("========================================")
+    print("FLASK INICIANDO")
+    print("PORTA:", PORT)
+    print("========================================")
+
+    app.run(
+        host="0.0.0.0",
+        port=PORT,
+        debug=False,
+        use_reloader=False
+    )
