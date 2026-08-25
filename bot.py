@@ -87,10 +87,6 @@ def puxar_dados_blaze():
 
         resposta.raise_for_status()
 
-        # ======================================================================
-        # CONVERTER RESPOSTA PARA JSON
-        # ======================================================================
-
         try:
 
             dados = resposta.json()
@@ -108,10 +104,6 @@ def puxar_dados_blaze():
                 "A Blaze não retornou JSON."
             ) from erro_json
 
-        # ======================================================================
-        # VERIFICAR FORMATO
-        # ======================================================================
-
         if not isinstance(dados, list):
 
             raise ValueError(
@@ -126,10 +118,6 @@ def puxar_dados_blaze():
             )
 
         historico = []
-
-        # ======================================================================
-        # PROCESSAR RODADAS
-        # ======================================================================
 
         for rodada in dados:
 
@@ -151,20 +139,12 @@ def puxar_dados_blaze():
                 if roll is None:
                     continue
 
-                # ==============================================================
-                # CONVERTER DATA
-                # ==============================================================
-
                 data_texto = created_at.replace(
                     "Z",
                     "+00:00"
                 )
 
                 dt = datetime.fromisoformat(data_texto)
-
-                # ==============================================================
-                # UTC PARA HORÁRIO DE BRASÍLIA
-                # ==============================================================
 
                 if dt.tzinfo is not None:
 
@@ -182,10 +162,6 @@ def puxar_dados_blaze():
                     "%H:%M:%S"
                 )
 
-                # ==============================================================
-                # CONVERTER COR
-                # ==============================================================
-
                 if color == 0:
                     cor = "Branco"
 
@@ -197,10 +173,6 @@ def puxar_dados_blaze():
 
                 else:
                     cor = f"Desconhecido ({color})"
-
-                # ==============================================================
-                # ADICIONAR AO HISTÓRICO
-                # ==============================================================
 
                 historico.append(
                     {
@@ -218,10 +190,6 @@ def puxar_dados_blaze():
                 )
 
                 continue
-
-        # ======================================================================
-        # VERIFICAR RESULTADO FINAL
-        # ======================================================================
 
         if not historico:
 
@@ -268,6 +236,84 @@ def puxar_dados_blaze():
 
 
 # ==============================================================================
+# TESTE SSE TIPMINER
+# ==============================================================================
+
+@app.route("/teste-sse", methods=["GET"])
+def teste_sse():
+
+    url = (
+        "https://api.core.public.tipminer.com/v1/double/"
+        "rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/live"
+    )
+
+    try:
+
+        print("========================================")
+        print("TESTANDO SSE DO TIPMINER")
+        print("URL:", url)
+        print("========================================")
+
+        resposta = requests.get(
+            url,
+            stream=True,
+            timeout=20,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "text/event-stream",
+                "Cache-Control": "no-cache"
+            }
+        )
+
+        print("STATUS SSE:", resposta.status_code)
+        print(
+            "CONTENT-TYPE:",
+            resposta.headers.get("Content-Type")
+        )
+
+        resposta.raise_for_status()
+
+        contador = 0
+
+        for linha in resposta.iter_lines(
+            decode_unicode=True
+        ):
+
+            if not linha:
+                continue
+
+            print("SSE:", linha)
+
+            contador += 1
+
+            if contador >= 10:
+                break
+
+        resposta.close()
+
+        return (
+            f"SSE funcionando. "
+            f"Recebidas {contador} linhas.",
+            200
+        )
+
+    except Exception as erro:
+
+        print("========================================")
+        print("ERRO NO TESTE SSE")
+        print("TIPO:", type(erro).__name__)
+        print("ERRO:", str(erro))
+        print("========================================")
+
+        traceback.print_exc()
+
+        return (
+            f"ERRO SSE: {type(erro).__name__}: {erro}",
+            500
+        )
+
+
+# ==============================================================================
 # COMANDO /START
 # ==============================================================================
 
@@ -309,10 +355,6 @@ def responder_usuario(message):
 
         pergunta_usuario = message.text or ""
 
-        # ======================================================================
-        # TESTE DO TELEGRAM
-        # ======================================================================
-
         if pergunta_usuario.strip().upper() == "TESTE 123":
 
             bot.reply_to(
@@ -325,10 +367,6 @@ def responder_usuario(message):
             )
 
             return
-
-        # ======================================================================
-        # BUSCAR DADOS REAIS
-        # ======================================================================
 
         print(
             "BUSCANDO HISTÓRICO REAL..."
@@ -343,10 +381,6 @@ def responder_usuario(message):
         print(
             dados_blaze[:2000]
         )
-
-        # ======================================================================
-        # INSTRUÇÃO PARA GEMINI
-        # ======================================================================
 
         instrucao_ia = """
 Você é um interpretador estatístico estrito.
@@ -398,10 +432,6 @@ REGRAS:
     procure a ocorrência mais recente no histórico.
 """
 
-        # ======================================================================
-        # ENVIAR PARA GEMINI
-        # ======================================================================
-
         conteudo_envio = (
             "HISTÓRICO REAL DA DOUBLE:\n"
             f"{dados_blaze}\n\n"
@@ -433,10 +463,6 @@ REGRAS:
         print(
             "GEMINI RESPONDEU COM SUCESSO"
         )
-
-        # ======================================================================
-        # RESPONDER TELEGRAM
-        # ======================================================================
 
         bot.reply_to(
             message,
