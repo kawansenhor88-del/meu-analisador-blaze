@@ -3,6 +3,9 @@ import json
 import traceback
 import threading
 import time
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from collections import deque
 from datetime import datetime, timezone, timedelta
 
@@ -30,6 +33,7 @@ TIPMINER_SSE_URL = (
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
 PORT = int(os.environ.get("PORT", "10000"))
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
 if not TELEGRAM_TOKEN:
@@ -66,9 +70,152 @@ app = Flask(__name__)
 
 historico_double = deque(maxlen=200)
 
+# O banco guarda TODO o histórico.
+# O deque acima continua sendo apenas um cache rápido
+# das últimas 200 rodadas em memória.
+
 historico_lock = threading.Lock()
 
 ultima_rodada_id = None
+
+
+# ==============================================================================
+# BANCO DE DADOS POSTGRESQL
+# ==============================================================================
+
+def conectar_banco():
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL não configurada no Render. "
+            "Adicione a URL do PostgreSQL nas variáveis de ambiente."
+        )
+
+    return psycopg2.connect(
+        DATABASE_URL,
+        connect_timeout=10
+    )
+
+
+def inicializar_banco():
+    conn = None
+
+    try:
+        conn = conectar_banco()
+
+        with conn.cursor() as cursor:
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS rodadas_double (
+                    id TEXT PRIMARY KEY,
+                    tempo TEXT,
+                    resultado TEXT,
+                    numero TEXT,
+                    instant TEXT,
+                    tipo TEXT NOT NULL DEFAULT 'DOUBLE',
+                    criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_rodadas_double_instant
+                ON rodadas_double (instant DESC)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_rodadas_double_criado_em
+                ON rodadas_double (criado_em DESC)
+            """)
+
+        conn.commit()
+
+        print("POSTGRESQL: banco inicializado com sucesso.")
+
+    except Exception:
+
+        if conn is not None:
+            conn.rollback()
+
+        print("ERRO AO INICIALIZAR POSTGRESQL:")
+        traceback.print_exc()
+
+        raise
+
+    finally:
+
+        if conn is not None:
+            conn.close()
+
+
+def salvar_rodada_banco(rodada_id, rodada):
+    conn = None
+
+    try:
+        conn = conectar_banco()
+
+        with conn.cursor() as cursor:
+
+            cursor.execute("""
+                INSERT INTO rodadas_double
+                    (id, tempo, resultado, numero, instant, tipo)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+            """, (
+                str(rodada_id),
+                rodada.get("tempo"),
+                rodada.get("resultado"),
+                None if rodada.get("numero") is None
+                else str(rodada.get("numero")),
+                rodada.get("instant"),
+                rodada.get("tipo", "DOUBLE")
+            ))
+
+            inserida = cursor.rowcount == 1
+
+        conn.commit()
+
+        return inserida
+
+    except Exception:
+
+        if conn is not None:
+            conn.rollback()
+
+        print("ERRO AO SALVAR RODADA NO POSTGRESQL:")
+        traceback.print_exc()
+
+        return False
+
+    finally:
+
+        if conn is not None:
+            conn.close()
+
+
+def obter_historico_banco(limite=200):
+    conn = None
+
+    try:
+        conn = conectar_banco()
+
+        with conn.cursor(
+            cursor_factory=RealDictCursor
+        ) as cursor:
+
+            cursor.execute("""
+                SELECT tempo, resultado, numero, instant, tipo
+                FROM rodadas_double
+                ORDER BY criado_em DESC
+                LIMIT %s
+            """, (int(limite),))
+
+            linhas = cursor.fetchall()
+
+        return [dict(linha) for linha in linhas]
+
+    finally:
+
+        if conn is not None:
+            conn.close()
 
 
 # ==============================================================================
@@ -81,6 +228,7 @@ def converter_horario(valor):
         return None
 
     try:
+
         texto = str(valor)
 
         if texto.endswith("Z"):
@@ -96,6 +244,7 @@ def converter_horario(valor):
         return dt.strftime("%H:%M:%S")
 
     except Exception:
+
         return str(valor)
 
 
@@ -109,6 +258,7 @@ def converter_cor(valor):
         return None
 
     try:
+
         numero = int(valor)
 
         if numero == 0:
@@ -213,6 +363,21 @@ def adicionar_rodada(payload):
         "tipo": "DOUBLE"
     }
 
+    # Primeiro grava no banco permanente.
+    # Se o banco falhar, não avançamos o histórico em memória.
+
+    if not salvar_rodada_banco(
+        rodada_id,
+        rodada
+    ):
+
+        print(
+            "RODADA NÃO FOI GRAVADA NO BANCO. "
+            "Ela não será adicionada ao cache."
+        )
+
+        return False
+
     with historico_lock:
 
         if historico_double:
@@ -223,6 +388,7 @@ def adicionar_rodada(payload):
                 ultima.get("instant") == rodada.get("instant")
                 and ultima.get("numero") == rodada.get("numero")
             ):
+
                 return False
 
         historico_double.appendleft(rodada)
@@ -281,13 +447,17 @@ def processar_evento_sse(evento):
 
     except Exception as erro:
 
-        print("ERRO AO CONVERTER EVENTO SSE PARA JSON:")
+        print(
+            "ERRO AO CONVERTER EVENTO SSE PARA JSON:"
+        )
+
         print(erro)
         print(texto_json[:1000])
 
         return
 
     print("JSON SSE:")
+
     print(
         json.dumps(
             payload,
@@ -299,11 +469,15 @@ def processar_evento_sse(evento):
         return
 
     # Evento heartbeat
+
     if payload.get("type") == "heartbeat":
+
         print("HEARTBEAT RECEBIDO")
+
         return
 
     # Evento DOUBLE diretamente
+
     if payload.get("type") == "DOUBLE":
 
         adicionar_rodada(payload)
@@ -311,12 +485,15 @@ def processar_evento_sse(evento):
         return
 
     # Dados dentro de "data"
+
     dados = payload.get("data")
 
     if isinstance(dados, dict):
 
         if dados.get("type") == "heartbeat":
+
             print("HEARTBEAT RECEBIDO")
+
             return
 
         if dados.get("type") == "DOUBLE":
@@ -338,6 +515,7 @@ def processar_evento_sse(evento):
             return
 
     # Resultado diretamente no payload
+
     if (
         "result" in payload
         or "color" in payload
@@ -365,7 +543,10 @@ def capturar_tipminer():
 
         try:
 
-            print("CONECTANDO AO SSE DO TIPMINER...")
+            print(
+                "CONECTANDO AO SSE DO TIPMINER..."
+            )
+
             print(TIPMINER_SSE_URL)
 
             resposta = requests.get(
@@ -446,7 +627,8 @@ def capturar_tipminer():
                     pass
 
         print(
-            "TENTANDO RECONECTAR AO TIPMINER EM 5 SEGUNDOS..."
+            "TENTANDO RECONECTAR AO TIPMINER "
+            "EM 5 SEGUNDOS..."
         )
 
         time.sleep(5)
@@ -474,14 +656,20 @@ def iniciar_capturador():
 
 def obter_historico():
 
-    with historico_lock:
+    # O banco é a fonte permanente.
+    # O deque continua como cache local.
 
-        dados = list(historico_double)
+    dados = obter_historico_banco(200)
+
+    if not dados:
+
+        with historico_lock:
+            dados = list(historico_double)
 
     if not dados:
 
         raise RuntimeError(
-            "Ainda não recebi nenhuma rodada DOUBLE do TipMiner."
+            "Ainda não existe nenhuma rodada DOUBLE no banco."
         )
 
     return json.dumps(
@@ -697,27 +885,27 @@ def receber_webhook():
             "utf-8"
         )
 
-        update = telebot.types.Update.de_json(
-            json_string
-        )
+                    update = telebot.types.Update.de_json(
+                json_string
+            )
 
-        bot.process_new_updates(
-            [update]
-        )
+            bot.process_new_updates(
+                [update]
+            )
 
-        return "OK", 200
+            return "OK", 200
 
-    except Exception as erro:
+        except Exception as erro:
 
-        print("========================================")
-        print("ERRO NO WEBHOOK")
-        print("TIPO:", type(erro).__name__)
-        print("ERRO:", str(erro))
-        print("========================================")
+            print("========================================")
+            print("ERRO NO WEBHOOK")
+            print("TIPO:", type(erro).__name__)
+            print("ERRO:", str(erro))
+            print("========================================")
 
-        traceback.print_exc()
+            traceback.print_exc()
 
-        return "ERROR", 500
+            return "ERROR", 500
 
 
 # ==============================================================================
@@ -787,6 +975,8 @@ if __name__ == "__main__":
     print("INICIANDO BOT DOUBLE")
     print("========================================")
 
+    inicializar_banco()
+
     iniciar_capturador()
 
     configurar_webhook()
@@ -801,4 +991,4 @@ if __name__ == "__main__":
         port=PORT,
         debug=False,
         use_reloader=False
-    )
+        )
