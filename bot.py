@@ -1,6 +1,9 @@
 import os
 import json
 import traceback
+import threading
+import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -17,6 +20,11 @@ from google.genai import types
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+TIPMINER_SSE_URL = (
+    "https://api.core.public.tipminer.com/v1/double/"
+    "rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/live"
+)
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("ERRO: variável TELEGRAM_TOKEN não configurada.")
@@ -47,270 +55,491 @@ app = Flask(__name__)
 
 
 # ==============================================================================
-# BUSCAR HISTÓRICO REAL DA DOUBLE
+# HISTÓRICO DA DOUBLE
 # ==============================================================================
 
-def puxar_dados_blaze():
+historico_double = deque(maxlen=200)
 
-    url = (
-        "https://blaze.bet.br/api/"
-        "singleplayer-originals/originals/"
-        "roulette_games/recent/1"
-    )
+historico_lock = threading.Lock()
 
-    print("========================================")
-    print("BUSCANDO HISTÓRICO REAL DA DOUBLE")
-    print("URL:", url)
-    print("========================================")
+ultima_rodada_id = None
+
+
+# ==============================================================================
+# CONVERTER HORÁRIO
+# ==============================================================================
+
+def converter_horario(valor):
+
+    if not valor:
+        return None
 
     try:
 
-        resposta = requests.get(
-            url,
-            timeout=15,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-                "Referer": "https://blaze.com/"
-            }
-        )
+        texto = str(valor)
 
-        print("STATUS BLAZE:", resposta.status_code)
-        print(
-            "CONTENT-TYPE:",
-            resposta.headers.get("Content-Type")
-        )
-        print(
-            "TAMANHO DA RESPOSTA:",
-            len(resposta.text)
-        )
+        if texto.endswith("Z"):
+            texto = texto[:-1] + "+00:00"
 
-        resposta.raise_for_status()
+        dt = datetime.fromisoformat(texto)
+
+        if dt.tzinfo is not None:
+
+            dt = dt.astimezone(
+                timezone(
+                    timedelta(hours=-3)
+                )
+            )
+
+        return dt.strftime("%H:%M:%S")
+
+    except Exception:
+
+        return str(valor)
+
+
+# ==============================================================================
+# CONVERTER COR
+# ==============================================================================
+
+def converter_cor(valor):
+
+    if valor is None:
+        return None
+
+    try:
+
+        numero = int(valor)
+
+        if numero == 0:
+            return "Branco"
+
+        if numero == 1:
+            return "Vermelho"
+
+        if numero == 2:
+            return "Preto"
+
+    except Exception:
+        pass
+
+    texto = str(valor).strip().lower()
+
+    if texto in ["white", "branco"]:
+        return "Branco"
+
+    if texto in ["red", "vermelho"]:
+        return "Vermelho"
+
+    if texto in ["black", "preto"]:
+        return "Preto"
+
+    return str(valor)
+
+
+# ==============================================================================
+# ADICIONAR RODADA
+# ==============================================================================
+
+def adicionar_rodada(payload):
+
+    global ultima_rodada_id
+
+    if not isinstance(payload, dict):
+        return False
+
+    tipo = payload.get("type")
+
+    if tipo and str(tipo).upper() != "DOUBLE":
+        return False
+
+    resultado = payload.get("result")
+
+    instant = payload.get("instant")
+
+    color = payload.get("color")
+
+    roll = payload.get("roll")
+
+    # --------------------------------------------------------------------------
+    # Se houver objeto interno, tentar localizar os dados
+    # --------------------------------------------------------------------------
+
+    if resultado is None:
+
+        resultado = payload.get("value")
+
+    if instant is None:
+
+        instant = payload.get("created_at")
+
+    if color is None:
+
+        color = payload.get("colour")
+
+    if roll is None:
+
+        roll = payload.get("number")
+
+    # --------------------------------------------------------------------------
+    # Sem resultado não temos uma rodada
+    # --------------------------------------------------------------------------
+
+    if resultado is None and color is None and roll is None:
+        return False
+
+    # --------------------------------------------------------------------------
+    # Identificador para evitar duplicação
+    # --------------------------------------------------------------------------
+
+    rodada_id = (
+        payload.get("id")
+        or payload.get("uuid")
+        or instant
+    )
+
+    if rodada_id is not None:
+
+        rodada_id = str(rodada_id)
+
+        if rodada_id == ultima_rodada_id:
+            return False
+
+    # --------------------------------------------------------------------------
+    # Determinar resultado
+    # --------------------------------------------------------------------------
+
+    valor_cor = color
+
+    if valor_cor is None:
+        valor_cor = resultado
+
+    cor = converter_cor(valor_cor)
+
+    # --------------------------------------------------------------------------
+    # Número
+    # --------------------------------------------------------------------------
+
+    numero = roll
+
+    if numero is None:
+        numero = resultado
+
+    # --------------------------------------------------------------------------
+    # Horário
+    # --------------------------------------------------------------------------
+
+    horario = converter_horario(instant)
+
+    if horario is None:
+
+        horario = datetime.now(
+            timezone(
+                timedelta(hours=-3)
+            )
+        ).strftime("%H:%M:%S")
+
+    rodada = {
+        "tempo": horario,
+        "resultado": cor,
+        "numero": numero,
+        "instant": instant,
+        "tipo": "DOUBLE"
+    }
+
+    # --------------------------------------------------------------------------
+    # Salvar
+    # --------------------------------------------------------------------------
+
+    with historico_lock:
+
+        # Evitar duplicação por conteúdo
+        if historico_double:
+
+            ultima = historico_double[0]
+
+            if (
+                ultima.get("instant") == rodada.get("instant")
+                and ultima.get("numero") == rodada.get("numero")
+            ):
+                return False
+
+        historico_double.appendleft(rodada)
+
+    ultima_rodada_id = rodada_id
+
+    print("========================================")
+    print("NOVA RODADA DOUBLE RECEBIDA")
+    print(rodada)
+    print("HISTÓRICO:", len(historico_double))
+    print("========================================")
+
+    return True
+
+
+# ==============================================================================
+# PROCESSAR EVENTO SSE
+# ==============================================================================
+
+def processar_evento_sse(evento):
+
+    if not evento:
+        return
+
+    evento = evento.strip()
+
+    if not evento:
+        return
+
+    print("SSE EVENTO BRUTO:")
+    print(evento)
+
+    linhas = evento.splitlines()
+
+    dados_json = []
+
+    for linha in linhas:
+
+        linha = linha.strip()
+
+        if linha.startswith("data:"):
+
+            conteudo = linha[5:].strip()
+
+            if conteudo:
+                dados_json.append(conteudo)
+
+    if not dados_json:
+
+        return
+
+    texto_json = "\n".join(dados_json)
+
+    try:
+
+        payload = json.loads(texto_json)
+
+    except Exception as erro:
+
+        print("ERRO AO CONVERTER EVENTO SSE PARA JSON:")
+        print(erro)
+        print(texto_json[:1000])
+
+        return
+
+    print("JSON SSE:")
+    print(
+        json.dumps(
+            payload,
+            ensure_ascii=False
+        )[:3000]
+    )
+
+    # --------------------------------------------------------------------------
+    # Evento pode ser diretamente um DOUBLE
+    # --------------------------------------------------------------------------
+
+    if isinstance(payload, dict):
+
+        if payload.get("type") == "DOUBLE":
+
+            adicionar_rodada(payload)
+
+            return
+
+        # ----------------------------------------------------------------------
+        # Algumas transmissões podem colocar os dados dentro de "data"
+        # ----------------------------------------------------------------------
+
+        dados = payload.get("data")
+
+        if isinstance(dados, dict):
+
+            if dados.get("type") == "DOUBLE":
+
+                adicionar_rodada(dados)
+
+                return
+
+            if (
+                "result" in dados
+                or "color" in dados
+                or "roll" in dados
+            ):
+
+                dados["type"] = "DOUBLE"
+
+                adicionar_rodada(dados)
+
+                return
+
+        # ----------------------------------------------------------------------
+        # Evento pode ter resultado diretamente
+        # ----------------------------------------------------------------------
+
+        if (
+            "result" in payload
+            or "color" in payload
+            or "roll" in payload
+        ):
+
+            payload["type"] = "DOUBLE"
+
+            adicionar_rodada(payload)
+
+
+# ==============================================================================
+# CAPTURAR SSE DO TIPMINER
+# ==============================================================================
+
+def capturar_tipminer():
+
+    print("========================================")
+    print("CAPTURADOR TIPMINER INICIANDO")
+    print("========================================")
+
+    while True:
+
+        resposta = None
 
         try:
 
-            dados = resposta.json()
+            print("CONECTANDO AO SSE DO TIPMINER...")
+            print(TIPMINER_SSE_URL)
 
-        except Exception as erro_json:
-
-            print("========================================")
-            print("A RESPOSTA NÃO É JSON")
-            print("TIPO:", type(erro_json).__name__)
-            print("ERRO:", str(erro_json))
-            print("RESPOSTA:", resposta.text[:1000])
-            print("========================================")
-
-            raise RuntimeError(
-                "A Blaze não retornou JSON."
-            ) from erro_json
-
-        if not isinstance(dados, list):
-
-            raise ValueError(
-                "A API retornou um formato inesperado: "
-                f"{type(dados).__name__}"
+            resposta = requests.get(
+                TIPMINER_SSE_URL,
+                stream=True,
+                timeout=60,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "text/event-stream",
+                    "Cache-Control": "no-cache"
+                }
             )
 
-        if len(dados) == 0:
-
-            raise ValueError(
-                "A API respondeu, mas não retornou nenhuma rodada."
+            print(
+                "STATUS TIPMINER:",
+                resposta.status_code
             )
 
-        historico = []
+            print(
+                "CONTENT-TYPE:",
+                resposta.headers.get("Content-Type")
+            )
 
-        for rodada in dados:
+            resposta.raise_for_status()
 
-            try:
+            print("========================================")
+            print("SSE TIPMINER CONECTADO")
+            print("AGUARDANDO EVENTOS DOUBLE...")
+            print("========================================")
 
-                if not isinstance(rodada, dict):
+            evento_atual = []
+
+            for linha in resposta.iter_lines(
+                decode_unicode=True
+            ):
+
+                if linha is None:
                     continue
 
-                created_at = rodada.get("created_at")
-                color = rodada.get("color")
-                roll = rodada.get("roll")
+                # --------------------------------------------------------------
+                # Linha vazia encerra um evento SSE
+                # --------------------------------------------------------------
 
-                if not created_at:
-                    continue
+                if linha == "":
 
-                if color is None:
-                    continue
+                    if evento_atual:
 
-                if roll is None:
-                    continue
-
-                data_texto = created_at.replace(
-                    "Z",
-                    "+00:00"
-                )
-
-                dt = datetime.fromisoformat(data_texto)
-
-                if dt.tzinfo is not None:
-
-                    dt_brasilia = dt.astimezone(
-                        timezone(
-                            timedelta(hours=-3)
+                        processar_evento_sse(
+                            "\n".join(evento_atual)
                         )
-                    )
 
-                else:
+                        evento_atual = []
 
-                    dt_brasilia = dt
+                    continue
 
-                horario = dt_brasilia.strftime(
-                    "%H:%M:%S"
+                # --------------------------------------------------------------
+                # Guardar linha
+                # --------------------------------------------------------------
+
+                evento_atual.append(linha)
+
+            # ------------------------------------------------------------------
+            # Processar último evento caso conexão encerre sem linha vazia
+            # ------------------------------------------------------------------
+
+            if evento_atual:
+
+                processar_evento_sse(
+                    "\n".join(evento_atual)
                 )
 
-                if color == 0:
-                    cor = "Branco"
+        except Exception as erro:
 
-                elif color == 1:
-                    cor = "Vermelho"
+            print("========================================")
+            print("ERRO NA CONEXÃO TIPMINER")
+            print("TIPO:", type(erro).__name__)
+            print("ERRO:", str(erro))
+            print("========================================")
 
-                elif color == 2:
-                    cor = "Preto"
+            traceback.print_exc()
 
-                else:
-                    cor = f"Desconhecido ({color})"
+        finally:
 
-                historico.append(
-                    {
-                        "tempo": horario,
-                        "resultado": cor,
-                        "numero": roll
-                    }
-                )
+            if resposta is not None:
 
-            except Exception as erro_rodada:
-
-                print(
-                    "ERRO AO PROCESSAR RODADA:",
-                    str(erro_rodada)
-                )
-
-                continue
-
-        if not historico:
-
-            raise ValueError(
-                "A API respondeu, mas nenhuma rodada "
-                "pôde ser processada."
-            )
-
-        print("========================================")
-        print(
-            "RODADAS RECEBIDAS:",
-            len(historico)
-        )
+                try:
+                    resposta.close()
+                except Exception:
+                    pass
 
         print(
-            "RODADA MAIS RECENTE:",
-            historico[0]
+            "TENTANDO RECONECTAR AO TIPMINER EM 5 SEGUNDOS..."
         )
 
-        print(
-            "RODADA MAIS ANTIGA:",
-            historico[-1]
-        )
-
-        print("========================================")
-
-        return json.dumps(
-            historico,
-            ensure_ascii=False
-        )
-
-    except Exception as erro:
-
-        print("========================================")
-        print("FALHA AO BUSCAR HISTÓRICO")
-        print("TIPO:", type(erro).__name__)
-        print("ERRO:", str(erro))
-        print("========================================")
-
-        raise RuntimeError(
-            "Não foi possível obter o histórico real da Double. "
-            f"Último erro: {type(erro).__name__}: {erro}"
-        ) from erro
+        time.sleep(5)
 
 
 # ==============================================================================
-# TESTE SSE TIPMINER
+# INICIAR CAPTURADOR EM SEGUNDO PLANO
 # ==============================================================================
 
-@app.route("/teste-sse", methods=["GET"])
-def teste_sse():
+def iniciar_capturador():
 
-    url = (
-        "https://api.core.public.tipminer.com/v1/double/"
-        "rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/live"
+    thread = threading.Thread(
+        target=capturar_tipminer,
+        daemon=True
     )
 
-    try:
+    thread.start()
 
-        print("========================================")
-        print("TESTANDO SSE DO TIPMINER")
-        print("URL:", url)
-        print("========================================")
+    print(
+        "THREAD DO TIPMINER INICIADA."
+    )
 
-        resposta = requests.get(
-            url,
-            stream=True,
-            timeout=20,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "text/event-stream",
-                "Cache-Control": "no-cache"
-            }
+
+# ==============================================================================
+# OBTER HISTÓRICO
+# ==============================================================================
+
+def obter_historico():
+
+    with historico_lock:
+
+        dados = list(historico_double)
+
+    if not dados:
+
+        raise RuntimeError(
+            "Ainda não recebi nenhuma rodada DOUBLE do TipMiner."
         )
 
-        print("STATUS SSE:", resposta.status_code)
-        print(
-            "CONTENT-TYPE:",
-            resposta.headers.get("Content-Type")
-        )
-
-        resposta.raise_for_status()
-
-        contador = 0
-
-        for linha in resposta.iter_lines(
-            decode_unicode=True
-        ):
-
-            if not linha:
-                continue
-
-            print("SSE:", linha)
-
-            contador += 1
-
-            if contador >= 10:
-                break
-
-        resposta.close()
-
-        return (
-            f"SSE funcionando. "
-            f"Recebidas {contador} linhas.",
-            200
-        )
-
-    except Exception as erro:
-
-        print("========================================")
-        print("ERRO NO TESTE SSE")
-        print("TIPO:", type(erro).__name__)
-        print("ERRO:", str(erro))
-        print("========================================")
-
-        traceback.print_exc()
-
-        return (
-            f"ERRO SSE: {type(erro).__name__}: {erro}",
-            500
-        )
+    return json.dumps(
+        dados,
+        ensure_ascii=False
+    )
 
 
 # ==============================================================================
@@ -325,6 +554,7 @@ def iniciar(message):
     bot.reply_to(
         message,
         "🤖 Bot online!\n\n"
+        "Captura TipMiner ativa.\n"
         "Envie uma pergunta sobre o histórico da Double."
     )
 
@@ -355,6 +585,10 @@ def responder_usuario(message):
 
         pergunta_usuario = message.text or ""
 
+        # ----------------------------------------------------------------------
+        # TESTE TELEGRAM
+        # ----------------------------------------------------------------------
+
         if pergunta_usuario.strip().upper() == "TESTE 123":
 
             bot.reply_to(
@@ -368,19 +602,27 @@ def responder_usuario(message):
 
             return
 
-        print(
-            "BUSCANDO HISTÓRICO REAL..."
-        )
-
-        dados_blaze = puxar_dados_blaze()
+        # ----------------------------------------------------------------------
+        # HISTÓRICO TIPMINER
+        # ----------------------------------------------------------------------
 
         print(
-            "DADOS RECEBIDOS COM SUCESSO."
+            "OBTENDO HISTÓRICO DO TIPMINER..."
+        )
+
+        dados_double = obter_historico()
+
+        print(
+            "HISTÓRICO TIPMINER OBTIDO."
         )
 
         print(
-            dados_blaze[:2000]
+            dados_double[:5000]
         )
+
+        # ----------------------------------------------------------------------
+        # INSTRUÇÃO GEMINI
+        # ----------------------------------------------------------------------
 
         instrucao_ia = """
 Você é um interpretador estatístico estrito.
@@ -391,6 +633,8 @@ Cada rodada possui:
 - tempo
 - resultado
 - número
+- instant
+- tipo
 
 O histórico está ordenado da rodada mais recente
 para a mais antiga.
@@ -432,9 +676,13 @@ REGRAS:
     procure a ocorrência mais recente no histórico.
 """
 
+        # ----------------------------------------------------------------------
+        # ENVIAR PARA GEMINI
+        # ----------------------------------------------------------------------
+
         conteudo_envio = (
-            "HISTÓRICO REAL DA DOUBLE:\n"
-            f"{dados_blaze}\n\n"
+            "HISTÓRICO REAL DA DOUBLE CAPTURADO PELO TIPMINER:\n"
+            f"{dados_double}\n\n"
             "PERGUNTA DO USUÁRIO:\n"
             f"{pergunta_usuario}"
         )
@@ -464,6 +712,10 @@ REGRAS:
             "GEMINI RESPONDEU COM SUCESSO"
         )
 
+        # ----------------------------------------------------------------------
+        # RESPONDER TELEGRAM
+        # ----------------------------------------------------------------------
+
         bot.reply_to(
             message,
             texto_resposta
@@ -487,7 +739,7 @@ REGRAS:
 
             bot.reply_to(
                 message,
-                "❌ Não consegui obter os dados da Double.\n\n"
+                "❌ Ainda não consegui obter os dados da Double.\n\n"
                 f"Erro: {type(erro).__name__}: "
                 f"{str(erro)[:300]}"
             )
@@ -550,84 +802,4 @@ def receber_webhook():
 )
 def home():
 
-    return "Bot Online!", 200
-
-
-# ==============================================================================
-# INICIALIZAÇÃO
-# ==============================================================================
-
-if __name__ == "__main__":
-
-    porta = int(
-        os.environ.get(
-            "PORT",
-            10000
-        )
-    )
-
-    hostname = os.environ.get(
-        "RENDER_EXTERNAL_HOSTNAME"
-    )
-
-    if not hostname:
-
-        raise RuntimeError(
-            "RENDER_EXTERNAL_HOSTNAME não encontrado."
-        )
-
-    webhook_url = (
-        f"https://{hostname}/{TELEGRAM_TOKEN}"
-    )
-
-    print("========================================")
-    print("CONFIGURANDO WEBHOOK")
-    print("========================================")
-
-    print(
-        "URL:",
-        webhook_url
-    )
-
-    try:
-
-        bot.remove_webhook()
-
-        bot.set_webhook(
-            url=webhook_url
-        )
-
-        print(
-            "WEBHOOK CONFIGURADO COM SUCESSO"
-        )
-
-    except Exception as erro:
-
-        print(
-            "ERRO AO CONFIGURAR WEBHOOK"
-        )
-
-        print(
-            "TIPO:",
-            type(erro).__name__
-        )
-
-        print(
-            "ERRO:",
-            str(erro)
-        )
-
-        traceback.print_exc()
-
-    print("========================================")
-    print("BOT INICIANDO...")
-    print(
-        "PORTA:",
-        porta
-    )
-    print("========================================")
-
-    app.run(
-        host="0.0.0.0",
-        port=porta
-    )
+    return "Bot Online!"
