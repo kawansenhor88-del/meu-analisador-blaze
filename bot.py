@@ -681,7 +681,6 @@ if __name__ == "__main__":
     print("====================")
 
     inicializar_banco()
-    load_database_history()
     start_capturador()
     configure_webhook()
 
