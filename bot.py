@@ -677,19 +677,17 @@ def configurar_webhook():
 # ==============================================================================
 
 if __name__ == "__main__":
-    print("========================================")
-    print("INICIANDO BOT DOUBLE")
-    print("========================================")
+    print("STARTING DOUBLE BOT")
+    print("====================")
 
-    inicializar_banco()
-    carregar_historico_banco()
-    iniciar_capturador()
-    configurar_webhook()
+    initialize_bank()
+    load_database_history()
+    start_capturador()
+    configure_webhook()
 
-    print("========================================")
-    print("FLASK INICIANDO")
-    print("PORTA:", PORT)
-    print("========================================")
+    print("====================")
+    print("FLASK STARTING")
+    print("PORT:", PORT)
 
     app.run(
         host="0.0.0.0",
