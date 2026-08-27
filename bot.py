@@ -680,7 +680,7 @@ if __name__ == "__main__":
     print("STARTING DOUBLE BOT")
     print("====================")
 
-    initialize_bank()
+    inicializar_banco()
     load_database_history()
     start_capturador()
     configure_webhook()
