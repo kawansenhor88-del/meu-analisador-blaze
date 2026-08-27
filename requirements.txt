@@ -3,3 +3,4 @@ requests
 pyTelegramBotAPI
 google-genai
 gunicorn
+psycopg2-binary
