@@ -682,7 +682,7 @@ if __name__ == "__main__":
 
     inicializar_banco()
     iniciar_capturador()
-    configure_webhook()
+    configurar_webhook()
 
     print("====================")
     print("FLASK STARTING")
