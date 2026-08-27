@@ -3,12 +3,13 @@ import json
 import traceback
 import threading
 import time
-import sqlite3
 from collections import deque
 from datetime import datetime, timezone, timedelta
 
 import requests
 import telebot
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import Flask, request
 from google import genai
 from google.genai import types
@@ -32,14 +33,12 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
 PORT = int(os.environ.get("PORT", "10000"))
 
+
 # ==============================================================================
-# BANCO SQLITE
+# BANCO POSTGRESQL / SUPABASE
 # ==============================================================================
 
-DATABASE_FILE = os.environ.get(
-    "DATABASE_FILE",
-    "double_history.db"
-)
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Limite máximo de rodadas mantidas no banco.
 MAX_HISTORY = 100000
@@ -53,6 +52,11 @@ if not TELEGRAM_TOKEN:
 if not GEMINI_KEY:
     raise RuntimeError(
         "ERRO: variável GEMINI_KEY não configurada."
+    )
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "ERRO: variável DATABASE_URL não configurada."
     )
 
 
@@ -96,20 +100,23 @@ ultima_rodada_id = None
 
 
 # ==============================================================================
-# BANCO SQLITE
+# CONEXÃO COM POSTGRESQL / SUPABASE
 # ==============================================================================
 
 def conectar_banco():
 
-    conn = sqlite3.connect(
-        DATABASE_FILE,
-        timeout=30
+    conn = psycopg2.connect(
+        DATABASE_URL,
+        sslmode="require",
+        connect_timeout=30
     )
-
-    conn.row_factory = sqlite3.Row
 
     return conn
 
+
+# ==============================================================================
+# INICIALIZAR BANCO
+# ==============================================================================
 
 def inicializar_banco():
 
@@ -122,14 +129,14 @@ def inicializar_banco():
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS double_rounds (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 rodada_id TEXT UNIQUE,
                 tempo TEXT,
                 resultado TEXT,
                 numero TEXT,
                 instant TEXT,
                 tipo TEXT NOT NULL DEFAULT 'DOUBLE',
-                criado_em TEXT NOT NULL
+                criado_em TIMESTAMPTZ NOT NULL
             )
             """
         )
@@ -145,10 +152,21 @@ def inicializar_banco():
         conn.commit()
 
         print("========================================")
-        print("BANCO SQLITE INICIALIZADO")
-        print("ARQUIVO:", DATABASE_FILE)
+        print("BANCO POSTGRESQL / SUPABASE INICIALIZADO")
         print("LIMITE DE RODADAS:", MAX_HISTORY)
         print("========================================")
+
+    except Exception:
+
+        conn.rollback()
+
+        print(
+            "ERRO AO INICIALIZAR POSTGRESQL:"
+        )
+
+        traceback.print_exc()
+
+        raise
 
     finally:
 
@@ -167,7 +185,9 @@ def carregar_historico_banco():
 
     try:
 
-        cursor = conn.cursor()
+        cursor = conn.cursor(
+            cursor_factory=RealDictCursor
+        )
 
         cursor.execute(
             """
@@ -190,7 +210,10 @@ def carregar_historico_banco():
 
             historico_double.clear()
 
-            for linha in linhas:
+            # O SELECT está em ordem da mais recente
+            # para a mais antiga.
+
+            for linha in reversed(linhas):
 
                 rodada = {
                     "tempo": linha["tempo"],
@@ -211,7 +234,7 @@ def carregar_historico_banco():
             )
 
         print("========================================")
-        print("HISTÓRICO CARREGADO DO SQLITE")
+        print("HISTÓRICO CARREGADO DO POSTGRESQL")
         print(
             "RODADAS RECUPERADAS:",
             len(linhas)
@@ -242,11 +265,11 @@ def salvar_rodada_banco(
 
         agora = datetime.now(
             timezone.utc
-        ).isoformat()
+        )
 
         cursor.execute(
             """
-            INSERT OR IGNORE INTO double_rounds
+            INSERT INTO double_rounds
             (
                 rodada_id,
                 tempo,
@@ -256,7 +279,8 @@ def salvar_rodada_banco(
                 tipo,
                 criado_em
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (rodada_id) DO NOTHING
             """,
             (
                 str(rodada_id),
@@ -281,7 +305,9 @@ def salvar_rodada_banco(
         conn.commit()
 
         # Mantém no máximo 100.000 rodadas.
-        # Se ultrapassar o limite, remove as mais antigas.
+        # As rodadas mais antigas são removidas
+        # quando o limite é ultrapassado.
+
         cursor.execute(
             """
             DELETE FROM double_rounds
@@ -289,7 +315,7 @@ def salvar_rodada_banco(
                 SELECT id
                 FROM double_rounds
                 ORDER BY id DESC
-                LIMIT ?
+                LIMIT %s
             )
             """,
             (MAX_HISTORY,)
@@ -304,7 +330,7 @@ def salvar_rodada_banco(
         conn.rollback()
 
         print(
-            "ERRO AO SALVAR RODADA NO SQLITE:"
+            "ERRO AO SALVAR RODADA NO POSTGRESQL:"
         )
 
         traceback.print_exc()
@@ -354,7 +380,9 @@ def obter_historico_banco():
 
     try:
 
-        cursor = conn.cursor()
+        cursor = conn.cursor(
+            cursor_factory=RealDictCursor
+        )
 
         cursor.execute(
             """
@@ -718,7 +746,7 @@ def adicionar_rodada(payload):
         total = contar_rodadas_banco()
 
         print(
-            "TOTAL NO SQLITE:",
+            "TOTAL NO POSTGRESQL:",
             total
         )
 
@@ -969,7 +997,7 @@ def capturar_tipminer():
                 resposta.status_code
             )
 
-            print(
+                        print(
                 "CONTENT-TYPE:",
                 resposta.headers.get(
                     "Content-Type"
@@ -1058,11 +1086,11 @@ def capturar_tipminer():
 
         finally:
 
-            if resposta is not None:
+            if response is not None:
 
                 try:
 
-                    resposta.close()
+                    response.close()
 
                 except Exception:
 
@@ -1216,10 +1244,6 @@ def responder_usuario(message):
             len(dados_double)
         )
 
-        print(
-            dados_double[:5000]
-        )
-
         instrucao_ia = """
 Você é um interpretador estatístico estrito.
 
@@ -1274,7 +1298,7 @@ procure a ocorrência mais recente no histórico.
 
         conteudo_envio = (
             "HISTÓRICO DA DOUBLE "
-            "SALVO NO BANCO SQLITE:\n"
+            "SALVO NO BANCO:\n"
             f"{dados_double}\n\n"
             "PERGUNTA DO USUÁRIO:\n"
             f"{pergunta_usuario}"
@@ -1527,17 +1551,12 @@ if __name__ == "__main__":
         "========================================"
     )
 
-    # 1. Cria o banco/tabela se ainda não existir.
     inicializar_banco()
 
-    # 2. Recupera as últimas 200 rodadas
-    #    salvas anteriormente.
     carregar_historico_banco()
 
-    # 3. Inicia captura em tempo real.
     iniciar_capturador()
 
-    # 4. Configura Telegram.
     configurar_webhook()
 
     print(
@@ -1562,4 +1581,4 @@ if __name__ == "__main__":
         port=PORT,
         debug=False,
         use_reloader=False
-    )
+    )        
