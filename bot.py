@@ -329,4 +329,3 @@ def adicionar_rodada(payload):
     if resultado is None:
         resultado = payload.get("value")
     if instant is None:
-        
