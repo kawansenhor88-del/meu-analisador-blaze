@@ -214,7 +214,7 @@ def contar_rodadas_banco():
         conn.close()
 
 
-def obter_historico_banco(limite=None):
+def obtener_historico_banco(limite=None):
     conn = conectar_banco()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -234,7 +234,7 @@ def obter_historico_banco(limite=None):
         conn.close()
 
 
-def obter_ultimo_por_cor(cor):
+def obtener_ultimo_por_cor(cor):
     conn = conectar_banco()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -329,3 +329,4 @@ def adicionar_rodada(payload):
     if resultado is None:
         resultado = payload.get("value")
     if instant is None:
+        instant = payload.get("created_at")
