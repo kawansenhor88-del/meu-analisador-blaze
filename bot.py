@@ -426,16 +426,14 @@ def processar_evento_sse(evento):
     if not dados_json:
         return
 
-    try:
+        try:
         payload = json.loads("\n".join(dados_json))
-
-".join(dados_json))
     except Exception as erro:
         print("ERRO AO CONVERTER EVENTO SSE:")
         print(erro)
-        print("
-".join(dados_json)[:1000])
+        print("\n".join(dados_json)[:1000])
         return
+
 
     print("JSON SSE:")
     print(json.dumps(payload, ensure_ascii=False)[:3000])
