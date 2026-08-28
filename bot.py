@@ -427,7 +427,8 @@ def processar_evento_sse(evento):
         return
 
     try:
-        payload = json.loads("
+        payload = json.loads("\n".join(dados_json))
+
 ".join(dados_json))
     except Exception as erro:
         print("ERRO AO CONVERTER EVENTO SSE:")
