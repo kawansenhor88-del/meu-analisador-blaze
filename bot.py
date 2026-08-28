@@ -171,10 +171,8 @@ def salvar_rodada_banco(rodada, rodada_id):
                 str(rodada_id),
                 rodada.get("tempo"),
                 rodada.get("resultado"),
-                str(rodada.get("numero"))
-                if rodada.get("numero") is not None else None,
-                str(rodada.get("instant"))
-                if rodada.get("instant") is not None else None,
+                str(rodada.get("numero")) if rodada.get("numero") is not None else None,
+                str(rodada.get("instant")) if rodada.get("instant") is not None else None,
                 rodada.get("tipo", "DOUBLE"),
                 agora,
             ),
@@ -329,4 +327,6 @@ def adicionar_rodada(payload):
     roll = payload.get("roll")
 
     if resultado is None:
+        resultado = payload.get("value")
+    if instant is None:
         
