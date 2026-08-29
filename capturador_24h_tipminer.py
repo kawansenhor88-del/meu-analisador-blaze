@@ -2,16 +2,14 @@ import os
 import json
 import time
 import traceback
-import threading
 from datetime import datetime, timezone, timedelta
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 import psycopg2
 
 
 # ============================================================
-# CAPTURADOR TIPMINER 24H - SERVIÇO WEB GRATUITO BELMO
+# CAPTURADOR TIPMINER 24H
 # ============================================================
 
 TIPMINER_SSE_URL = os.getenv(
@@ -74,6 +72,11 @@ def inicializar_banco():
 
 
 def salvar_rodada(rodada):
+    """
+    Salva uma rodada usando rodada_id único.
+    Se o TipMiner reenviar a mesma rodada depois de uma
+    reconexão, o PostgreSQL ignora a duplicata.
+    """
     conn = conectar_banco()
 
     try:
@@ -102,6 +105,7 @@ def salvar_rodada(rodada):
         inseriu = cur.rowcount > 0
         conn.commit()
 
+        # Mantém somente as 100.000 mais recentes.
         cur.execute(
             """
             DELETE FROM double_rounds
@@ -199,7 +203,7 @@ def horario_brasilia(valor):
 
 
 # ============================================================
-# NORMALIZAÇÃO
+# NORMALIZAÇÃO DA RODADA
 # ============================================================
 
 def normalizar_rodada(payload):
@@ -208,9 +212,11 @@ def normalizar_rodada(payload):
 
     tipo = str(payload.get("type") or "").upper()
 
+    # Ignora heartbeat e outros eventos que não sejam rodada.
     if tipo == "HEARTBEAT":
         return None
 
+    # Alguns SSEs colocam a rodada dentro de "data".
     dados = payload.get("data")
 
     if isinstance(dados, dict):
@@ -223,6 +229,7 @@ def normalizar_rodada(payload):
     if tipo == "HEARTBEAT":
         return None
 
+    # Campos possíveis encontrados no SSE.
     resultado = candidato.get("result")
     if resultado is None:
         resultado = candidato.get("value")
@@ -239,6 +246,7 @@ def normalizar_rodada(payload):
     if numero is None:
         numero = candidato.get("number")
 
+    # Em alguns formatos "result" é o próprio número.
     if numero is None and resultado is not None:
         try:
             int(resultado)
@@ -246,7 +254,8 @@ def normalizar_rodada(payload):
         except (ValueError, TypeError):
             pass
 
-    # Não inventa cor com base somente no tipo do evento.
+    # Só aceita uma rodada quando consegue determinar a cor
+    # por um campo explícito ou pelo número.
     cor = None
 
     if color is not None:
@@ -255,9 +264,11 @@ def normalizar_rodada(payload):
     if cor is None and numero is not None:
         cor = converter_cor(numero)
 
+    # Não inventa a cor com base apenas no tipo do evento.
     if cor not in ("Vermelho", "Preto", "Branco"):
         return None
 
+    # ID real do evento, quando existir.
     rodada_id = (
         candidato.get("id")
         or candidato.get("uuid")
@@ -265,14 +276,17 @@ def normalizar_rodada(payload):
         or candidato.get("roundId")
     )
 
+    # Fallback estável para eventos sem ID.
     if rodada_id is None:
         if instant is None and numero is None:
             return None
 
         rodada_id = f"{instant}|{numero}|{cor}"
 
+    rodada_id = str(rodada_id)
+
     return {
-        "rodada_id": str(rodada_id),
+        "rodada_id": rodada_id,
         "tempo": horario_brasilia(instant),
         "resultado": cor,
         "numero": numero,
@@ -282,18 +296,20 @@ def normalizar_rodada(payload):
 
 
 # ============================================================
-# SSE
+# PROCESSAMENTO SSE
 # ============================================================
 
 def processar_evento(evento):
     if not evento:
         return
 
+    linhas = evento.splitlines()
     partes_data = []
 
-    for linha in evento.splitlines():
+    for linha in linhas:
         linha = linha.strip()
 
+        # Comentários SSE/heartbeat podem ser ignorados.
         if not linha or linha.startswith(":"):
             continue
 
@@ -306,11 +322,14 @@ def processar_evento(evento):
     if not partes_data:
         return
 
+    texto_json = "\n".join(partes_data)
+
     try:
-        payload = json.loads("\n".join(partes_data))
+        payload = json.loads(texto_json)
+
     except Exception:
         print("JSON SSE inválido:")
-        print("\n".join(partes_data)[:2000])
+        print(texto_json[:2000])
         return
 
     rodada = normalizar_rodada(payload)
@@ -333,12 +352,17 @@ def processar_evento(evento):
             print("TIPO:", rodada["tipo"])
             print("TOTAL NO BANCO:", total)
             print("========================================")
+
         else:
             print("↩️ Rodada já estava no banco:", rodada["rodada_id"])
 
     except Exception:
         print("ERRO PROCESSANDO RODADA:")
         traceback.print_exc()
+
+
+def processar_evento_sse(evento):
+    processar_evento(evento)
 
 
 # ============================================================
@@ -360,11 +384,26 @@ def capturar_24h():
             resposta = requests.get(
                 TIPMINER_SSE_URL,
                 stream=True,
+                # Timeout de conexão = 30s.
+                # Read timeout = None porque SSE é conexão contínua.
                 timeout=(30, None),
+
+                # Headers equivalentes aos observados
+                # na conexão funcionando pelo navegador.
                 headers={
-                    "User-Agent": "Mozilla/5.0",
                     "Accept": "text/event-stream",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Accept-Language": "pt-BR",
                     "Cache-Control": "no-cache",
+                    "Origin": "https://www.tipminer.com",
+                    "Referer": "https://www.tipminer.com/",
+                    "Sec-Ch-Ua": '"Chromium";v="127", "Not)A;Brand";v="99", "Microsoft Edge Simulate";v="127"',
+                    "Sec-Ch-Ua-Mobile": "?1",
+                    "Sec-Ch-Ua-Platform": '"Android"',
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "same-site",
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
                     "Connection": "keep-alive",
                 },
             )
@@ -376,11 +415,12 @@ def capturar_24h():
 
             print("========================================")
             print("🟢 SSE TIPMINER CONECTADO")
-            print("📡 CAPTURA CONTÍNUA ATIVA")
+            print("📡 Captura contínua ATIVA")
             print("========================================")
 
             evento_atual = []
 
+            # chunk_size pequeno para não esperar acumular muitos bytes.
             for linha in resposta.iter_lines(
                 decode_unicode=True,
                 chunk_size=1,
@@ -391,19 +431,22 @@ def capturar_24h():
                 if isinstance(linha, bytes):
                     linha = linha.decode("utf-8", errors="replace")
 
+                # Remove somente a quebra de linha; mantém o conteúdo.
                 linha = linha.rstrip("\r")
 
+                # Fim de um evento SSE.
                 if linha == "":
                     if evento_atual:
-                        processar_evento("\n".join(evento_atual))
+                        processar_evento_sse("\n".join(evento_atual))
                         evento_atual = []
 
                     continue
 
                 evento_atual.append(linha)
 
+            # Processa o último evento, caso a conexão tenha fechado.
             if evento_atual:
-                processar_evento("\n".join(evento_atual))
+                processar_evento_sse("\n".join(evento_atual))
 
             print("⚠️ SSE foi encerrado pelo servidor.")
 
@@ -432,53 +475,6 @@ def capturar_24h():
 
 
 # ============================================================
-# SERVIÇO HTTP MÍNIMO PARA A BELMO
-# ============================================================
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/", "/health", "/healthz"):
-            try:
-                total = contar_rodadas()
-                corpo = (
-                    "TipMiner capturador 24h OK\n"
-                    f"rodadas_no_banco={total}\n"
-                )
-                status = 200
-            except Exception as erro:
-                corpo = f"Capturador ativo, banco com erro: {erro}\n"
-                status = 503
-
-            dados = corpo.encode("utf-8")
-
-            self.send_response(status)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(dados)))
-            self.end_headers()
-            self.wfile.write(dados)
-            return
-
-        self.send_response(404)
-        self.end_headers()
-
-    def log_message(self, formato, *args):
-        print("HTTP:", formato % args)
-
-
-def iniciar_servidor_web():
-    porta = int(os.getenv("PORT", "8080"))
-    servidor = ThreadingHTTPServer(("0.0.0.0", porta), HealthHandler)
-
-    print("========================================")
-    print("🌐 SERVIÇO WEB BELMO ATIVO")
-    print("PORTA:", porta)
-    print("HEALTH:", "/health")
-    print("========================================")
-
-    servidor.serve_forever()
-
-
-# ============================================================
 # INÍCIO
 # ============================================================
 
@@ -490,13 +486,4 @@ if __name__ == "__main__":
     except Exception:
         traceback.print_exc()
 
-    # Captura roda em segundo plano enquanto o servidor HTTP
-    # mantém o Serviço Web da Belmo saudável.
-    thread_captura = threading.Thread(
-        target=capturar_24h,
-        name="tipminer-capturador",
-        daemon=True,
-    )
-    thread_captura.start()
-
-    iniciar_servidor_web()
+    capturar_24h()
