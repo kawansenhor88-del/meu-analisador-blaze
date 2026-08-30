@@ -22,44 +22,34 @@ TIPMINER_HISTORY_URL = (
 )
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
 app = Flask(__name__)
 
 
 # ============================================================
-# BUSCAR TIPMINER
+# BUSCAR UMA QUANTIDADE
 # ============================================================
 
-def buscar_rodadas():
-
-    print("🔥 INICIANDO TESTE TIPMINER 5000")
+def testar_limite(limite):
 
     headers = {
         "Accept": "*/*",
-
         "Origin": "https://www.tipminer.com",
-
         "Referer": "https://www.tipminer.com/",
-
         "User-Agent": (
-            "Mozilla/5.0 "
-            "(Linux; Android 10; K) "
+            "Mozilla/5.0 (Linux; Android 10; K) "
             "AppleWebKit/537.36 "
             "(KHTML, like Gecko) "
-            "Chrome/127.0.0.0 "
-            "Mobile Safari/537.36"
+            "Chrome/127.0.0.0 Mobile Safari/537.36"
         ),
-
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-site",
-
         "Sec-Ch-Ua-Mobile": "?1",
         "Sec-Ch-Ua-Platform": '"Android"',
     }
 
     params = {
-        "limit": "5000",
+        "limit": str(limite),
         "subject": "filter",
         "isLoadMore": "true",
         "t": str(int(time.time() * 1000)),
@@ -76,44 +66,20 @@ def buscar_rodadas():
             timeout=60
         )
 
-        print("========================================")
-        print("🔥 RESPOSTA TIPMINER")
-        print("STATUS:", resposta.status_code)
         print(
-            "CONTENT-TYPE:",
-            resposta.headers.get("Content-Type")
+            f"🔥 LIMIT={limite} | "
+            f"HTTP={resposta.status_code} | "
+            f"BYTES={len(resposta.content)}"
         )
-        print(
-            "TAMANHO:",
-            len(resposta.content)
-        )
-        print("URL FINAL:")
-        print(resposta.url)
-        print("========================================")
-
-        # ====================================================
-        # MOSTRAR RESPOSTA BRUTA
-        # ====================================================
-
-        texto_bruto = resposta.text
-
-        print("🔥 PRIMEIROS 2000 CARACTERES:")
-        print(texto_bruto[:2000])
-        print("========================================")
 
         if resposta.status_code != 200:
 
             return {
-                "ok": False,
+                "limite": limite,
                 "status": resposta.status_code,
-                "tamanho": len(resposta.content),
-                "bruto": texto_bruto[:2000],
-                "erro": "HTTP diferente de 200"
+                "quantidade": 0,
+                "erro": resposta.text[:300]
             }
-
-        # ====================================================
-        # TENTAR JSON
-        # ====================================================
 
         try:
 
@@ -122,18 +88,14 @@ def buscar_rodadas():
         except Exception as erro:
 
             return {
-                "ok": False,
+                "limite": limite,
                 "status": resposta.status_code,
-                "tamanho": len(resposta.content),
-                "bruto": texto_bruto[:2000],
-                "erro": (
-                    "JSON inválido: "
-                    + str(erro)
-                )
+                "quantidade": 0,
+                "erro": "JSON inválido: " + str(erro)
             }
 
         # ====================================================
-        # IDENTIFICAR LISTA
+        # LOCALIZAR LISTA
         # ====================================================
 
         if isinstance(dados, list):
@@ -142,29 +104,15 @@ def buscar_rodadas():
 
         elif isinstance(dados, dict):
 
-            print(
-                "🔥 CHAVES:",
-                list(dados.keys())
-            )
-
-            if isinstance(
-                dados.get("data"),
-                list
-            ):
+            if isinstance(dados.get("data"), list):
 
                 rodadas = dados["data"]
 
-            elif isinstance(
-                dados.get("rounds"),
-                list
-            ):
+            elif isinstance(dados.get("rounds"), list):
 
                 rodadas = dados["rounds"]
 
-            elif isinstance(
-                dados.get("results"),
-                list
-            ):
+            elif isinstance(dados.get("results"), list):
 
                 rodadas = dados["results"]
 
@@ -177,27 +125,18 @@ def buscar_rodadas():
             rodadas = []
 
         return {
-            "ok": True,
+            "limite": limite,
             "status": resposta.status_code,
-            "tamanho": len(resposta.content),
             "quantidade": len(rodadas),
-            "rodadas": rodadas,
-            "bruto": texto_bruto[:1000]
+            "erro": ""
         }
 
     except Exception as erro:
 
-        print(
-            "❌ ERRO:",
-            type(erro).__name__,
-            str(erro)
-        )
-
         return {
-            "ok": False,
+            "limite": limite,
             "status": 0,
-            "tamanho": 0,
-            "bruto": "",
+            "quantidade": 0,
             "erro": str(erro)
         }
 
@@ -220,83 +159,88 @@ def receber_mensagem(message):
         message.text or ""
     ).lower()
 
-    if "5000" not in texto:
+    if "teste" not in texto:
 
         bot.send_message(
             message.chat.id,
-            "Envie:\n\n5000 rodadas"
+            "Envie:\n\n"
+            "teste"
         )
 
         return
 
     bot.send_message(
         message.chat.id,
-        "🔎 Consultando o TipMiner...\n\n"
-        "Aguarde."
+        "🔎 TESTE INICIADO\n\n"
+        "Vou consultar:\n"
+        "200\n"
+        "500\n"
+        "1.000\n"
+        "2.000\n"
+        "5.000\n\n"
+        "Aguarde..."
     )
 
-    resultado = buscar_rodadas()
+    limites = [
+        200,
+        500,
+        1000,
+        2000,
+        5000
+    ]
 
-    # ========================================================
-    # ERRO
-    # ========================================================
+    resultados = []
 
-    if not resultado["ok"]:
+    for limite in limites:
 
-        mensagem = (
-            "❌ ERRO NO TIPMINER\n\n"
-            f"HTTP: {resultado['status']}\n"
-            f"Tamanho: {resultado['tamanho']}\n\n"
-            f"{resultado['erro']}\n\n"
-            "📄 RESPOSTA BRUTA:\n"
-            "--------------------\n"
-            f"{resultado['bruto'][:2500]}"
+        resultado = testar_limite(
+            limite
         )
 
-        bot.send_message(
-            message.chat.id,
-            mensagem
+        resultados.append(
+            resultado
         )
 
-        return
+        time.sleep(1)
 
     # ========================================================
-    # SUCESSO
+    # MONTAR RESULTADO
     # ========================================================
 
-    quantidade = resultado["quantidade"]
+    mensagem = (
+        "📊 RESULTADO DO TESTE\n\n"
+    )
+
+    for resultado in resultados:
+
+        limite = resultado["limite"]
+        quantidade = resultado["quantidade"]
+        status = resultado["status"]
+
+        mensagem += (
+            f"Solicitado: {limite:,}\n"
+            f"Recebido: {quantidade:,}\n"
+            f"HTTP: {status}\n"
+        )
+
+        if resultado["erro"]:
+
+            mensagem += (
+                f"Erro: "
+                f"{resultado['erro'][:150]}\n"
+            )
+
+        mensagem += "\n"
+
+    mensagem += (
+        "================================\n"
+        "🔎 FIM DO TESTE"
+    )
 
     bot.send_message(
         message.chat.id,
-        "📊 RESULTADO\n\n"
-        "Solicitadas: 5.000\n"
-        f"Recebidas: {quantidade}\n\n"
-        f"HTTP: {resultado['status']}\n"
-        f"Tamanho: {resultado['tamanho']} bytes"
+        mensagem
     )
-
-    # ========================================================
-    # PRIMEIRA E ÚLTIMA
-    # ========================================================
-
-    rodadas = resultado["rodadas"]
-
-    if quantidade > 0:
-
-        primeira = rodadas[0]
-        ultima = rodadas[-1]
-
-        bot.send_message(
-            message.chat.id,
-            "📌 PRIMEIRA RODADA:\n\n"
-            + str(primeira)
-        )
-
-        bot.send_message(
-            message.chat.id,
-            "📌 ÚLTIMA RODADA:\n\n"
-            + str(ultima)
-        )
 
 
 # ============================================================
@@ -356,7 +300,7 @@ def receber_webhook():
 )
 def inicio():
 
-    return "TESTE TIPMINER ONLINE", 200
+    return "TESTE LIMITES TIPMINER ONLINE", 200
 
 
 @app.route("/health")
@@ -445,4 +389,4 @@ if __name__ == "__main__":
         port=PORT,
         debug=False,
         use_reloader=False
-    )
+        )
