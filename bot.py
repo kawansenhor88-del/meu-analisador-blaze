@@ -1,17 +1,17 @@
 import requests
 import json
 
-URL = "https://api.core.public.tipminer.com/v1/double/rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/live"
+URL = "https://api.core.public.tipminer.com/v1/double/rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/history"
 
 PARAMS = {
-    "limit": "400",
+    "limit": 1000,
     "subject": "filter",
     "isLoadMore": "true",
     "timezone": "America/Sao_Paulo"
 }
 
 print("========================================")
-print("TIPMINER HISTORICAL TEST")
+print("TIPMINER HISTORICAL TEST - 1000")
 print("========================================")
 
 try:
@@ -20,7 +20,9 @@ try:
         params=PARAMS,
         headers={
             "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json"
+            "Accept": "*/*",
+            "Origin": "https://www.tipminer.com",
+            "Referer": "https://www.tipminer.com/"
         },
         timeout=30
     )
@@ -33,32 +35,57 @@ try:
     data = response.json()
 
     print("RESPONSE TYPE:", type(data).__name__)
-    print("ROUNDS RECEIVED:", len(data))
 
-    print("")
-    print("========================================")
-    print("POSITIONS 0, 99, 100, 199, 200, 299, 300, 399")
-    print("========================================")
+    if isinstance(data, list):
 
-    for position in [0, 99, 100, 199, 200, 299, 399]:
-        if position < len(data):
-            print("")
-            print("POSITION:", position)
-            print(json.dumps(data[position], ensure_ascii=False))
+        print("ROUNDS RECEIVED:", len(data))
 
-    print("")
-    print("========================================")
-    print("FIRST RECORD")
-    print("========================================")
+        positions = [
+            0, 99, 100, 199,
+            299, 399, 499, 599,
+            699, 799, 899, 999
+        ]
 
-    print(json.dumps(data[0], ensure_ascii=False))
+        print("")
+        print("========================================")
+        print("CHECKING POSITIONS")
+        print("========================================")
 
-    print("")
-    print("========================================")
-    print("LAST RECORD")
-    print("========================================")
+        for position in positions:
+            if position < len(data):
+                print("")
+                print("POSITION:", position)
+                print(json.dumps(data[position], ensure_ascii=False))
 
-    print(json.dumps(data[-1], ensure_ascii=False))
+        print("")
+        print("========================================")
+        print("FIRST RECORD")
+        print("========================================")
+
+        if data:
+            print(json.dumps(data[0], ensure_ascii=False))
+
+        print("")
+        print("========================================")
+        print("LAST RECORD")
+        print("========================================")
+
+        if data:
+            print(json.dumps(data[-1], ensure_ascii=False))
+
+        print("")
+        print("========================================")
+        print("FINAL RESULT")
+        print("========================================")
+
+        if len(data) >= 1000:
+            print("SUCCESS: 1000 ROUNDS RECEIVED")
+        else:
+            print("ONLY", len(data), "ROUNDS RECEIVED")
+
+    else:
+        print("ERROR: RESPONSE IS NOT A LIST")
+        print(json.dumps(data, ensure_ascii=False))
 
 except Exception as error:
     print("")
