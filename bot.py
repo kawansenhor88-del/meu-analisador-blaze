@@ -2,7 +2,6 @@ import os
 import time
 import threading
 import requests
-
 from flask import Flask
 
 app = Flask(__name__)
@@ -19,7 +18,6 @@ def testar_tipminer():
     print("========================================")
 
     try:
-
         resposta = requests.get(
             URL,
             params={
@@ -50,7 +48,7 @@ def testar_tipminer():
 
             print("ROUNDS RECEIVED:", len(dados))
 
-            if dados:
+            if len(dados) > 0:
 
                 print("")
                 print("FIRST RECORD:")
@@ -67,3 +65,44 @@ def testar_tipminer():
                 print("SUCCESS: 400 ROUNDS RECEIVED")
             else:
                 print("RECEIVED:", len(dados), "ROUNDS")
+
+            print("========================================")
+
+        else:
+            print("ERROR: RESPONSE IS NOT A LIST")
+            print(dados)
+
+    except Exception as erro:
+
+        print("========================================")
+        print("FAILED")
+        print("ERROR TYPE:", type(erro).__name__)
+        print("ERROR:", str(erro))
+        print("========================================")
+
+
+@app.route("/")
+def home():
+    return "TIPMINER TEST ONLINE", 200
+
+
+if __name__ == "__main__":
+
+    print("========================================")
+    print("STARTING TIPMINER TEST")
+    print("PORT:", PORT)
+    print("========================================")
+
+    thread = threading.Thread(
+        target=testar_tipminer,
+        daemon=True
+    )
+
+    thread.start()
+
+    app.run(
+        host="0.0.0.0",
+        port=PORT,
+        debug=False,
+        use_reloader=False
+                     )
