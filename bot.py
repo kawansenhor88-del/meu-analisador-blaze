@@ -1,125 +1,78 @@
-def carregar_historico_tipminer_400():
-    print("========================================")
-    print("📥 BUSCANDO 400 RODADAS DO TIPMINER")
-    print("========================================")
+import requests
 
-    params = {
-        "limit": 400,
-        "subject": "filter",
-        "isLoadMore": "true",
-        "t": int(time.time() * 1000),
-        "timezone": "America/Sao_Paulo",
-        "_cb": str(time.time())
-    }
+URL = "https://api.core.public.tipminer.com/v1/double/rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/history"
 
-    headers = {
-        "accept": "*/*",
-        "accept-language": "pt-BR",
-        "authorization": f"Bearer {TIPMINER_AUTH_TOKEN}",
-        "content-type": "application/json",
-        "origin": "https://www.tipminer.com",
-        "referer": "https://www.tipminer.com/",
-        "user-agent": "Mozilla/5.0"
-    }
+params = {
+    "limit": 400,
+    "subject": "filter",
+    "isLoadMore": "true",
+    "timezone": "America/Sao_Paulo",
+}
 
-    try:
-        resposta = requests.get(
-            TIPMINER_HISTORY_URL,
-            params=params,
-            headers=headers,
-            timeout=30
+headers = {
+    "Accept": "*/*",
+    "User-Agent": "Mozilla/5.0",
+    "Origin": "https://www.tipminer.com",
+    "Referer": "https://www.tipminer.com/",
+}
+
+print("========================================")
+print("TESTE HISTÓRICO TIPMINER")
+print("========================================")
+
+try:
+    resposta = requests.get(
+        URL,
+        params=params,
+        headers=headers,
+        timeout=30
+    )
+
+    print("STATUS:", resposta.status_code)
+    print("CONTENT-TYPE:", resposta.headers.get("Content-Type"))
+    print()
+
+    resposta.raise_for_status()
+
+    dados = resposta.json()
+
+    print("TIPO DA RESPOSTA:", type(dados).__name__)
+
+    if isinstance(dados, list):
+        rodadas = dados
+
+    elif isinstance(dados, dict):
+        print("CHAVES:", list(dados.keys()))
+
+        rodadas = (
+            dados.get("data")
+            or dados.get("rounds")
+            or dados.get("results")
+            or []
         )
 
-        print("🌐 HTTP:", resposta.status_code)
+    else:
+        rodadas = []
 
-        resposta.raise_for_status()
+    print("========================================")
+    print("RODADAS RECEBIDAS:", len(rodadas))
+    print("========================================")
 
-        dados = resposta.json()
+    if rodadas:
+        print("\nPRIMEIRO REGISTRO:")
+        print(rodadas[0])
 
-        # O endpoint pode devolver a lista diretamente
-        # ou dentro de uma propriedade do JSON.
-        if isinstance(dados, list):
-            registros = dados
+        print("\nÚLTIMO REGISTRO:")
+        print(rodadas[-1])
 
-        elif isinstance(dados, dict):
-            registros = None
+    else:
+        print("❌ Nenhuma rodada encontrada.")
+        print("\nRESPOSTA BRUTA:")
+        print(resposta.text[:5000])
 
-            for chave in (
-                "history",
-                "rounds",
-                "data",
-                "results",
-                "items"
-            ):
-                valor = dados.get(chave)
-
-                if isinstance(valor, list):
-                    registros = valor
-                    break
-
-            if registros is None:
-                registros = []
-
-                def procurar_listas(obj):
-                    if isinstance(obj, list):
-                        for item in obj:
-                            if isinstance(item, dict):
-                                if (
-                                    item.get("uuid")
-                                    or item.get("id")
-                                    or item.get("instant")
-                                    or item.get("result")
-                                ):
-                                    registros.append(item)
-                            else:
-                                procurar_listas(item)
-
-                    elif isinstance(obj, dict):
-                        for valor in obj.values():
-                            procurar_listas(valor)
-
-                procurar_listas(dados)
-
-        else:
-            registros = []
-
-        print("📊 REGISTROS RECEBIDOS:", len(registros))
-
-        if not registros:
-            print("❌ Nenhum registro encontrado.")
-            return
-
-        adicionados = 0
-
-        # O histórico do TipMiner vem mais recente primeiro.
-        # Colocamos do mais antigo para o mais recente para
-        # alimentar corretamente o histórico.
-        registros = list(reversed(registros))
-
-        for item in registros:
-            if not isinstance(item, dict):
-                continue
-
-            payload = dict(item)
-
-            if not payload.get("type"):
-                payload["type"] = "DOUBLE"
-
-            if adicionar_rodada(payload):
-                adicionados += 1
-
-        print("========================================")
-        print("📊 RESULTADO DO HISTÓRICO")
-        print("SOLICITADAS: 400")
-        print("RECEBIDAS:", len(registros))
-        print("ADICIONADAS:", adicionados)
-        print("TOTAL NO POSTGRESQL:", contar_rodadas_banco())
-        print("========================================")
-
-    except Exception as erro:
-        print("========================================")
-        print("❌ ERRO AO BUSCAR HISTÓRICO TIPMINER")
-        print("TIPO:", type(erro).__name__)
-        print("ERRO:", str(erro))
-        print("========================================")
-        traceback.print_exc()
+except Exception as erro:
+    print("========================================")
+    print("❌ ERRO")
+    print(type(erro).__name__)
+    print(str(erro))
+    print("========================================")
