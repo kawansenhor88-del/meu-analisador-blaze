@@ -33,10 +33,11 @@ app = Flask(__name__)
 
 
 # ============================================================
-# CONVERTER COR
+# COR
 # ============================================================
 
 def mapear_cor(resultado):
+
     try:
         numero = int(resultado)
 
@@ -56,46 +57,74 @@ def mapear_cor(resultado):
 
 
 # ============================================================
-# BUSCAR HISTÓRICO
+# BUSCAR HISTÓRICO 5000
 # ============================================================
 
 def buscar_rodadas(limite=5000):
 
+    # --------------------------------------------------------
+    # HEADERS SEMELHANTES AO TIPMINER REAL
+    # --------------------------------------------------------
+
     headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://tipminer.com",
-        "Referer": "https://tipminer.com/",
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Content-Type": "application/json",
+
+        "Origin": "https://www.tipminer.com",
+
+        "Referer": "https://www.tipminer.com/",
+
+        "Priority": "u=1, i",
+
+        "Sec-Ch-Ua": (
+            '"Chromium";v="127", '
+            '"Not(A:Brand";v="99", '
+            '"Microsoft Edge";v="127"'
+        ),
+
+        "Sec-Ch-Ua-Mobile": "?1",
+
+        "Sec-Ch-Ua-Platform": '"Android"',
+
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "Mozilla/5.0 (Linux; Android 10; K) "
             "AppleWebKit/537.36 "
             "(KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/127.0.0.0 Mobile Safari/537.36"
         ),
     }
 
-    # ========================================================
-    # MESMOS PARÂMETROS DA REQUISIÇÃO DO TIPMINER
-    # ========================================================
+    # --------------------------------------------------------
+    # PARÂMETROS
+    # --------------------------------------------------------
 
     params = {
         "limit": limite,
         "subject": "filter",
         "isLoadMore": "true",
 
-        # Parâmetro usado pelo TipMiner na requisição capturada
+        # Igual ao padrão observado no TipMiner
         "t": int(time.time() * 1000),
 
         "timezone": "America/Sao_Paulo",
 
-        # Cache-busting semelhante ao TipMiner
+        # Novo identificador para evitar cache
         "_cb": str(uuid.uuid4()),
     }
 
+    print()
     print("========================================")
-    print("TESTE TIPMINER /HISTORY")
+    print("TESTE REAL TIPMINER")
     print("========================================")
-    print("Limite solicitado:", limite)
-    print("Parâmetros:", params)
+    print("LIMITE SOLICITADO:", limite)
+    print("PARÂMETROS:")
+    print(params)
+    print("----------------------------------------")
 
     try:
 
@@ -107,30 +136,23 @@ def buscar_rodadas(limite=5000):
         )
 
         print("STATUS HTTP:", resposta.status_code)
-
+        print("----------------------------------------")
         print("URL FINAL:")
         print(resposta.url)
+        print("----------------------------------------")
 
         if resposta.status_code != 200:
 
             print("❌ API NÃO RETORNOU 200")
-            print("Resposta:", resposta.text[:1000])
+            print(resposta.text[:2000])
 
             return []
 
-        try:
-            dados = resposta.json()
+        dados = resposta.json()
 
-        except Exception:
-
-            print("❌ A resposta não é JSON válido.")
-            print("Resposta:", resposta.text[:1000])
-
-            return []
-
-        # ====================================================
-        # IDENTIFICAR LISTA
-        # ====================================================
+        # ----------------------------------------------------
+        # ENCONTRAR LISTA
+        # ----------------------------------------------------
 
         if isinstance(dados, dict):
 
@@ -154,28 +176,14 @@ def buscar_rodadas(limite=5000):
 
             rodadas = []
 
-        print("----------------------------------------")
         print("RODADAS RECEBIDAS:", len(rodadas))
-        print("----------------------------------------")
+        print("========================================")
 
         return rodadas
 
-    except requests.exceptions.Timeout:
-
-        print("❌ TIMEOUT")
-
-        return []
-
-    except requests.exceptions.RequestException as erro:
-
-        print("❌ ERRO DE CONEXÃO:")
-        print(erro)
-
-        return []
-
     except Exception as erro:
 
-        print("❌ ERRO INESPERADO:")
+        print("❌ ERRO:")
         print(type(erro).__name__)
         print(str(erro))
 
@@ -185,7 +193,7 @@ def buscar_rodadas(limite=5000):
 
 
 # ============================================================
-# FORMATAR RODADA
+# FORMATAR
 # ============================================================
 
 def formatar_rodada(numero, rodada):
@@ -213,7 +221,7 @@ def formatar_rodada(numero, rodada):
 
 
 # ============================================================
-# /START
+# START
 # ============================================================
 
 @bot.message_handler(commands=["start"])
@@ -221,14 +229,14 @@ def start(message):
 
     bot.reply_to(
         message,
-        "✅ BOT DE TESTE 5000 FUNCIONANDO!\n\n"
+        "✅ TESTE TIPMINER 5000 ONLINE!\n\n"
         "Envie:\n"
         "5000 rodadas"
     )
 
 
 # ============================================================
-# MENSAGENS
+# MENSAGEM
 # ============================================================
 
 @bot.message_handler(func=lambda message: True)
@@ -236,135 +244,114 @@ def receber_mensagem(message):
 
     texto = (message.text or "").lower()
 
-    if "5000" in texto and "rodada" in texto:
+    if "5000" not in texto or "rodada" not in texto:
+
+        bot.reply_to(
+            message,
+            "Envie: 5000 rodadas"
+        )
+
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "🔎 Consultando o TipMiner...\n"
+        "Solicitando 5.000 rodadas."
+    )
+
+    rodadas = buscar_rodadas(5000)
+
+    quantidade = len(rodadas)
+
+    print("RESULTADO:", quantidade)
+
+    # --------------------------------------------------------
+    # RESULTADO
+    # --------------------------------------------------------
+
+    if quantidade == 0:
 
         bot.send_message(
             message.chat.id,
-            "🔎 Buscando as 5.000 rodadas...\n"
-            "Aguarde."
+            "❌ A API não retornou rodadas."
+        )
+
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "📊 TESTE CONCLUÍDO\n\n"
+        f"Solicitadas: 5000\n"
+        f"Recebidas: {quantidade}"
+    )
+
+    # --------------------------------------------------------
+    # MOSTRAR PRIMEIRAS 20
+    # --------------------------------------------------------
+
+    texto = "📋 PRIMEIRAS 20:\n\n"
+
+    for i, rodada in enumerate(
+        rodadas[:20],
+        start=1
+    ):
+
+        texto += formatar_rodada(
+            i,
+            rodada
+        ) + "\n"
+
+    bot.send_message(
+        message.chat.id,
+        texto
+    )
+
+    # --------------------------------------------------------
+    # CORES
+    # --------------------------------------------------------
+
+    brancos = 0
+    vermelhos = 0
+    pretos = 0
+
+    for rodada in rodadas:
+
+        if not isinstance(rodada, dict):
+            continue
+
+        resultado = (
+            rodada.get("result")
+            if rodada.get("result") is not None
+            else rodada.get("resultado")
         )
 
         try:
 
-            rodadas = buscar_rodadas(5000)
+            numero = int(resultado)
 
-            quantidade = len(rodadas)
+            if numero == 0:
+                brancos += 1
 
-            print("========================================")
-            print("RESULTADO FINAL")
-            print("SOLICITADAS:", 5000)
-            print("RECEBIDAS:", quantidade)
-            print("========================================")
+            elif 1 <= numero <= 7:
+                vermelhos += 1
 
-            if quantidade == 0:
+            elif 8 <= numero <= 14:
+                pretos += 1
 
-                bot.send_message(
-                    message.chat.id,
-                    "⚠️ A API não retornou nenhuma rodada."
-                )
+        except Exception:
+            pass
 
-                return
-
-            bot.send_message(
-                message.chat.id,
-                f"📊 Resultado do teste:\n\n"
-                f"Solicitadas: 5000\n"
-                f"Recebidas: {quantidade}\n\n"
-                "Agora vou enviar uma amostra."
-            )
-
-            # =================================================
-            # AMOSTRA
-            # =================================================
-
-            amostra = ""
-
-            for i, rodada in enumerate(
-                rodadas[:20],
-                start=1
-            ):
-
-                amostra += (
-                    formatar_rodada(i, rodada)
-                    + "\n"
-                )
-
-            bot.send_message(
-                message.chat.id,
-                "📋 PRIMEIRAS 20 RODADAS:\n\n"
-                + amostra
-            )
-
-            # =================================================
-            # RESUMO DAS CORES
-            # =================================================
-
-            brancos = 0
-            vermelhos = 0
-            pretos = 0
-
-            for rodada in rodadas:
-
-                if not isinstance(rodada, dict):
-                    continue
-
-                resultado = (
-                    rodada.get("result")
-                    if rodada.get("result") is not None
-                    else rodada.get("resultado")
-                )
-
-                try:
-
-                    numero = int(resultado)
-
-                    if numero == 0:
-                        brancos += 1
-
-                    elif 1 <= numero <= 7:
-                        vermelhos += 1
-
-                    elif 8 <= numero <= 14:
-                        pretos += 1
-
-                except Exception:
-
-                    pass
-
-            bot.send_message(
-                message.chat.id,
-                "================================\n"
-                "📊 RESUMO\n"
-                "================================\n"
-                f"Solicitadas: 5000\n"
-                f"Recebidas: {quantidade}\n\n"
-                f"⚪ Brancos: {brancos}\n"
-                f"🔴 Vermelhos: {vermelhos}\n"
-                f"⚫ Pretos: {pretos}\n"
-                "================================"
-            )
-
-        except Exception as erro:
-
-            print("❌ ERRO:")
-            print(type(erro).__name__)
-            print(str(erro))
-
-            traceback.print_exc()
-
-            bot.send_message(
-                message.chat.id,
-                "❌ Erro no teste:\n\n"
-                f"{type(erro).__name__}: {erro}"
-            )
-
-        return
-
-    bot.reply_to(
-        message,
-        f"✅ Recebi sua mensagem!\n\n"
-        f"Você enviou: {message.text}\n\n"
-        "Envie: 5000 rodadas"
+    bot.send_message(
+        message.chat.id,
+        "================================\n"
+        "📊 RESUMO\n"
+        "================================\n"
+        f"Solicitadas: 5000\n"
+        f"Recebidas: {quantidade}\n\n"
+        f"⚪ Brancos: {brancos}\n"
+        f"🔴 Vermelhos: {vermelhos}\n"
+        f"⚫ Pretos: {pretos}\n"
+        "================================"
     )
 
 
@@ -372,28 +359,34 @@ def receber_mensagem(message):
 # WEBHOOK
 # ============================================================
 
-@app.route("/telegram/webhook", methods=["POST"])
+@app.route(
+    "/telegram/webhook",
+    methods=["POST"]
+)
 def receber_webhook():
 
     try:
 
-        json_string = request.get_data().decode("utf-8")
+        json_string = request.get_data().decode(
+            "utf-8"
+        )
 
         update = telebot.types.Update.de_json(
             json_string
         )
 
-        bot.process_new_updates([update])
+        bot.process_new_updates(
+            [update]
+        )
 
-        print("✅ UPDATE DO TELEGRAM RECEBIDO")
+        print("✅ UPDATE TELEGRAM RECEBIDO")
 
         return "OK", 200
 
     except Exception as erro:
 
-        print("❌ ERRO NO WEBHOOK")
-        print(type(erro).__name__)
-        print(str(erro))
+        print("❌ ERRO WEBHOOK")
+        print(erro)
 
         traceback.print_exc()
 
@@ -401,13 +394,13 @@ def receber_webhook():
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 
 @app.route("/", methods=["GET", "HEAD"])
 def inicio():
 
-    return "Bot webhook teste 5000 online.", 200
+    return "Teste TipMiner 5000 online.", 200
 
 
 @app.route("/health")
@@ -417,7 +410,7 @@ def health():
 
 
 # ============================================================
-# WEBHOOK TELEGRAM
+# WEBHOOK
 # ============================================================
 
 def configurar_webhook():
@@ -443,13 +436,11 @@ def configurar_webhook():
         )
 
         print("RESULTADO:", resultado)
-        print("✅ WEBHOOK CONFIGURADO")
 
     except Exception as erro:
 
-        print("❌ ERRO AO CONFIGURAR WEBHOOK")
-        print(type(erro).__name__)
-        print(str(erro))
+        print("❌ ERRO WEBHOOK")
+        print(erro)
 
         traceback.print_exc()
 
@@ -472,4 +463,4 @@ if __name__ == "__main__":
         port=PORT,
         debug=False,
         use_reloader=False,
-        )
+    )
