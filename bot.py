@@ -1,16 +1,25 @@
 import os
 import time
 import traceback
-
+import requests
 import telebot
 from flask import Flask, request
 
 # ============================================================
-# CONFIGURAÇÃO
+# CONFIGURAÇÕES
 # ============================================================
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+PORT = int(os.environ.get("PORT", "10000"))
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+
+TIPMINER_HISTORY_URL = (
+    "https://api.core.public.tipminer.com/"
+    "v1/double/rounds/"
+    "6ee2f33f-7dbf-40ae-b01c-b05368c806ba/"
+    "history"
+)
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN não configurado.")
@@ -23,24 +32,276 @@ app = Flask(__name__)
 
 
 # ============================================================
-# TESTE DO BOT
+# CONVERTER COR
+# ============================================================
+
+def mapear_cor(resultado):
+
+    try:
+        numero = int(resultado)
+
+        if numero == 0:
+            return "⚪ Branco"
+
+        if 1 <= numero <= 7:
+            return "🔴 Vermelho"
+
+        if 8 <= numero <= 14:
+            return "⚫ Preto"
+
+        return "❓ Desconhecido"
+
+    except Exception:
+        return "❓ Desconhecido"
+
+
+# ============================================================
+# BUSCAR 200 RODADAS
+# ============================================================
+
+def buscar_rodadas(limite=200):
+
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://tipminer.com",
+        "Referer": "https://tipminer.com/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+
+    params = {
+        "limit": limite,
+        "subject": "filter",
+        "isLoadMore": "true",
+        "timezone": "America/Sao_Paulo",
+    }
+
+    resposta = requests.get(
+        TIPMINER_HISTORY_URL,
+        params=params,
+        headers=headers,
+        timeout=30,
+    )
+
+    resposta.raise_for_status()
+
+    dados = resposta.json()
+
+    if isinstance(dados, dict):
+
+        if isinstance(dados.get("data"), list):
+            return dados["data"]
+
+        if isinstance(dados.get("rounds"), list):
+            return dados["rounds"]
+
+        if isinstance(dados.get("results"), list):
+            return dados["results"]
+
+    elif isinstance(dados, list):
+        return dados
+
+    return []
+
+
+# ============================================================
+# FORMATAR RODADA
+# ============================================================
+
+def formatar_rodada(numero, rodada):
+
+    if not isinstance(rodada, dict):
+        return f"{numero:03d} | {rodada}"
+
+    resultado = (
+        rodada.get("result")
+        if rodada.get("result") is not None
+        else rodada.get("resultado")
+    )
+
+    instant = rodada.get("instant", "N/A")
+    uuid = rodada.get("uuid", "N/A")
+
+    cor = mapear_cor(resultado)
+
+    return (
+        f"{numero:03d} | "
+        f"Resultado: {resultado} | "
+        f"{cor} | "
+        f"Instant: {instant} | "
+        f"ID: {str(uuid)[:12]}"
+    )
+
+
+# ============================================================
+# COMANDO /START
 # ============================================================
 
 @bot.message_handler(commands=["start"])
 def start(message):
+
     bot.reply_to(
         message,
         "✅ BOT DE TESTE FUNCIONANDO!\n\n"
-        "Telegram → Render → Flask → Bot OK."
+        "Envie:\n"
+        "200 rodadas\n\n"
+        "para consultar as 200 rodadas mais recentes."
     )
 
 
+# ============================================================
+# PEDIDO DAS 200 RODADAS
+# ============================================================
+
 @bot.message_handler(func=lambda message: True)
-def mensagem(message):
+def receber_mensagem(message):
+
+    texto = (message.text or "").lower()
+
+    if (
+        "200" in texto
+        and "rodada" in texto
+    ):
+
+        bot.send_message(
+            message.chat.id,
+            "🔎 Buscando as 200 rodadas mais recentes..."
+        )
+
+        try:
+
+            rodadas = buscar_rodadas(200)
+
+            quantidade = len(rodadas)
+
+            if quantidade == 0:
+
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ A API não retornou nenhuma rodada."
+                )
+
+                return
+
+            # ------------------------------------------------
+            # CABEÇALHO
+            # ------------------------------------------------
+
+            bot.send_message(
+                message.chat.id,
+                f"✅ API retornou {quantidade} rodadas.\n\n"
+                "📊 Enviando os registros..."
+            )
+
+            # ------------------------------------------------
+            # TELEGRAM TEM LIMITE DE TAMANHO POR MENSAGEM.
+            # DIVIDIMOS EM BLOCOS.
+            # ------------------------------------------------
+
+            bloco = ""
+
+            for i, rodada in enumerate(rodadas, start=1):
+
+                linha = formatar_rodada(i, rodada)
+
+                if len(bloco) + len(linha) + 1 > 3800:
+
+                    bot.send_message(
+                        message.chat.id,
+                        bloco
+                    )
+
+                    bloco = ""
+
+                    time.sleep(0.3)
+
+                bloco += linha + "\n"
+
+            if bloco:
+
+                bot.send_message(
+                    message.chat.id,
+                    bloco
+                )
+
+            # ------------------------------------------------
+            # RESUMO
+            # ------------------------------------------------
+
+            brancos = 0
+            vermelhos = 0
+            pretos = 0
+
+            for rodada in rodadas:
+
+                if not isinstance(rodada, dict):
+                    continue
+
+                resultado = (
+                    rodada.get("result")
+                    if rodada.get("result") is not None
+                    else rodada.get("resultado")
+                )
+
+                try:
+
+                    numero = int(resultado)
+
+                    if numero == 0:
+                        brancos += 1
+
+                    elif 1 <= numero <= 7:
+                        vermelhos += 1
+
+                    elif 8 <= numero <= 14:
+                        pretos += 1
+
+                except Exception:
+                    pass
+
+            bot.send_message(
+                message.chat.id,
+                "================================\n"
+                "📊 RESUMO DO TESTE\n"
+                "================================\n"
+                f"Solicitadas: 200\n"
+                f"Recebidas: {quantidade}\n\n"
+                f"⚪ Brancos: {brancos}\n"
+                f"🔴 Vermelhos: {vermelhos}\n"
+                f"⚫ Pretos: {pretos}\n"
+                "================================"
+            )
+
+        except Exception as erro:
+
+            print("❌ ERRO AO BUSCAR HISTÓRICO")
+            print(type(erro).__name__)
+            print(str(erro))
+
+            traceback.print_exc()
+
+            bot.send_message(
+                message.chat.id,
+                "❌ Erro ao consultar a API do TipMiner.\n\n"
+                f"{type(erro).__name__}: {erro}"
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # OUTRAS MENSAGENS
+    # --------------------------------------------------------
+
     bot.reply_to(
         message,
         f"✅ Recebi sua mensagem!\n\n"
-        f"Você enviou: {message.text}"
+        f"Você enviou: {message.text}\n\n"
+        "Para testar as rodadas, escreva:\n"
+        "200 rodadas"
     )
 
 
@@ -50,10 +311,14 @@ def mensagem(message):
 
 @app.route("/telegram/webhook", methods=["POST"])
 def receber_webhook():
+
     try:
+
         json_string = request.get_data().decode("utf-8")
 
-        update = telebot.types.Update.de_json(json_string)
+        update = telebot.types.Update.de_json(
+            json_string
+        )
 
         bot.process_new_updates([update])
 
@@ -62,9 +327,11 @@ def receber_webhook():
         return "OK", 200
 
     except Exception as erro:
+
         print("❌ ERRO NO WEBHOOK")
         print(type(erro).__name__)
         print(str(erro))
+
         traceback.print_exc()
 
         return "ERROR", 500
@@ -75,8 +342,15 @@ def receber_webhook():
 # ============================================================
 
 @app.route("/", methods=["GET", "HEAD"])
-def home():
+def inicio():
+
     return "Bot webhook de teste online.", 200
+
+
+@app.route("/health")
+def health():
+
+    return "OK", 200
 
 
 # ============================================================
@@ -118,22 +392,21 @@ def configurar_webhook():
 
 
 # ============================================================
-# INICIAR
+# SERVIDOR
 # ============================================================
 
 if __name__ == "__main__":
 
     configurar_webhook()
 
-    port = int(os.getenv("PORT", "10000"))
-
     print("========================================")
     print("SERVER STARTED")
-    print("PORT:", port)
+    print("PORT:", PORT)
     print("========================================")
 
     app.run(
         host="0.0.0.0",
-        port=port,
-        debug=False
-    )
+        port=PORT,
+        debug=False,
+        use_reloader=False,
+                )
