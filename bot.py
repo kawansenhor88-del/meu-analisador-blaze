@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 import traceback
 import requests
 import telebot
@@ -35,7 +36,6 @@ raise RuntimeError("TIPMINER_AUTH_TOKEN não configurado.")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(**name**)
-
 
 # ============================================================
 
@@ -106,7 +106,7 @@ params = {
     "isLoadMore": "true",
     "timezone": "America/Sao_Paulo",
     "t": int(time.time() * 1000),
-    "_cb": str(__import__("uuid").uuid4()),
+    "_cb": str(uuid.uuid4()),
 }
 
 resposta = requests.get(
@@ -127,6 +127,7 @@ resposta.raise_for_status()
 
 try:
     dados = resposta.json()
+
 except Exception as erro:
 
     print("❌ JSON INVÁLIDO")
@@ -172,7 +173,7 @@ resultado = (
 )
 
 instant = rodada.get("instant", "N/A")
-uuid = rodada.get("uuid", "N/A")
+uuid_rodada = rodada.get("uuid", "N/A")
 tipo = rodada.get("type", "N/A")
 
 cor = mapear_cor(resultado)
@@ -183,13 +184,13 @@ return (
     f"{cor} | "
     f"Tipo: {tipo} | "
     f"Instant: {instant} | "
-    f"ID: {str(uuid)[:12]}"
+    f"ID: {str(uuid_rodada)[:12]}"
 )
 ```
 
 # ============================================================
 
-# START
+# COMANDO /START
 
 # ============================================================
 
@@ -221,19 +222,15 @@ texto = (message.text or "").lower()
 if "rodada" in texto:
 
     if "2000" in texto or "2.000" in texto:
-
         limite = 2000
 
-    elif "500" in texto:
-
-        limite = 500
-
     elif "1000" in texto or "1.000" in texto:
-
         limite = 1000
 
-    else:
+    elif "500" in texto:
+        limite = 500
 
+    else:
         limite = 200
 
     bot.send_message(
@@ -270,7 +267,7 @@ if "rodada" in texto:
         )
 
         # ------------------------------------------------
-        # ENVIA AS RODADAS EM BLOCOS
+        # ENVIAR RODADAS EM BLOCOS
         # ------------------------------------------------
 
         bloco = ""
@@ -491,4 +488,4 @@ app.run(
     use_reloader=False,
 )
 ```
-            
+    
