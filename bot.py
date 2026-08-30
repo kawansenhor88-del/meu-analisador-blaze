@@ -2,6 +2,7 @@ import os
 import time
 import uuid
 import traceback
+
 import requests
 import telebot
 from flask import Flask, request
@@ -24,6 +25,12 @@ TIPMINER_HISTORY_URL = (
 "6ee2f33f-7dbf-40ae-b01c-b05368c806ba/"
 "history"
 )
+
+# ============================================================
+
+# VERIFICAÇÃO DAS VARIÁVEIS
+
+# ============================================================
 
 if not TELEGRAM_TOKEN:
 raise RuntimeError("TELEGRAM_TOKEN não configurado.")
@@ -111,7 +118,10 @@ resposta = requests.get(
 
 print("HTTP:", resposta.status_code)
 print("TAMANHO:", len(resposta.content), "bytes")
-print("CONTENT-TYPE:", resposta.headers.get("content-type"))
+print(
+    "CONTENT-TYPE:",
+    resposta.headers.get("content-type")
+)
 
 resposta.raise_for_status()
 
@@ -127,39 +137,62 @@ except Exception as erro:
 
     raise
 
-# --------------------------------------------------------
-# A API pode devolver diretamente uma lista.
-# --------------------------------------------------------
+# ========================================================
+# RESPOSTA DIRETA COMO LISTA
+# ========================================================
 
 if isinstance(dados, list):
 
     print("FORMATO: LISTA")
-    print("REGISTROS RECEBIDOS:", len(dados))
+    print(
+        "REGISTROS RECEBIDOS:",
+        len(dados)
+    )
 
     return dados
 
-# --------------------------------------------------------
-# Ou pode devolver a lista dentro de um objeto.
-# --------------------------------------------------------
+# ========================================================
+# RESPOSTA DENTRO DE OBJETO
+# ========================================================
 
 if isinstance(dados, dict):
 
     print("FORMATO: OBJETO")
-    print("CHAVES:", list(dados.keys()))
+    print(
+        "CHAVES:",
+        list(dados.keys())
+    )
 
     if isinstance(dados.get("data"), list):
-        print("REGISTROS EM data:", len(dados["data"]))
+
+        print(
+            "REGISTROS EM data:",
+            len(dados["data"])
+        )
+
         return dados["data"]
 
     if isinstance(dados.get("rounds"), list):
-        print("REGISTROS EM rounds:", len(dados["rounds"]))
+
+        print(
+            "REGISTROS EM rounds:",
+            len(dados["rounds"])
+        )
+
         return dados["rounds"]
 
     if isinstance(dados.get("results"), list):
-        print("REGISTROS EM results:", len(dados["results"]))
+
+        print(
+            "REGISTROS EM results:",
+            len(dados["results"])
+        )
+
         return dados["results"]
 
-print("⚠️ FORMATO DE RESPOSTA NÃO RECONHECIDO")
+print(
+    "⚠️ FORMATO DE RESPOSTA NÃO RECONHECIDO"
+)
 
 return []
 ```
@@ -176,15 +209,25 @@ def formatar_rodada(numero, rodada):
 if not isinstance(rodada, dict):
     return f"{numero:04d} | {rodada}"
 
-resultado = (
-    rodada.get("result")
-    if rodada.get("result") is not None
-    else rodada.get("resultado")
+resultado = rodada.get("result")
+
+if resultado is None:
+    resultado = rodada.get("resultado")
+
+instant = rodada.get(
+    "instant",
+    "N/A"
 )
 
-instant = rodada.get("instant", "N/A")
-uuid_rodada = rodada.get("uuid", "N/A")
-tipo = rodada.get("type", "N/A")
+uuid_rodada = rodada.get(
+    "uuid",
+    "N/A"
+)
+
+tipo = rodada.get(
+    "type",
+    "N/A"
+)
 
 cor = mapear_cor(resultado)
 
@@ -200,7 +243,7 @@ return (
 
 # ============================================================
 
-# /START
+# COMANDO START
 
 # ============================================================
 
@@ -211,7 +254,7 @@ def start(message):
 bot.reply_to(
     message,
     "✅ BOT DE TESTE FUNCIONANDO!\n\n"
-    "Envie uma destas opções:\n\n"
+    "Envie:\n\n"
     "200 rodadas\n"
     "400 rodadas\n"
     "1000 rodadas\n"
@@ -221,7 +264,7 @@ bot.reply_to(
 
 # ============================================================
 
-# RECEBER MENSAGEM
+# RECEBER MENSAGENS
 
 # ============================================================
 
@@ -229,36 +272,46 @@ bot.reply_to(
 def receber_mensagem(message):
 
 ```
-texto = (message.text or "").lower().replace(".", "")
+texto = (
+    message.text or ""
+).lower().replace(".", "")
 
 if "rodada" not in texto:
+
     bot.reply_to(
         message,
         "Envie, por exemplo:\n\n"
         "400 rodadas"
     )
+
     return
 
 if "2000" in texto:
+
     limite = 2000
 
 elif "1000" in texto:
+
     limite = 1000
 
 elif "400" in texto:
+
     limite = 400
 
 else:
+
     limite = 200
 
 bot.send_message(
     message.chat.id,
-    f"🔎 Consultando {limite} rodadas no TipMiner..."
+    f"🔎 Consultando {limite} rodadas..."
 )
 
 try:
 
-    rodadas = buscar_rodadas(limite)
+    rodadas = buscar_rodadas(
+        limite
+    )
 
     quantidade = len(rodadas)
 
@@ -277,30 +330,40 @@ try:
 
         return
 
-    # ----------------------------------------------------
-    # PRIMEIRA MENSAGEM: RESULTADO DA API
-    # ----------------------------------------------------
+    # ====================================================
+    # RESULTADO
+    # ====================================================
 
     bot.send_message(
         message.chat.id,
         "📊 RESULTADO\n\n"
         f"Solicitadas: {limite:,}\n"
         f"Recebidas: {quantidade:,}\n\n"
-        f"HTTP: 200"
-        .replace(",", ".")
+        "HTTP: 200"
     )
 
-    # ----------------------------------------------------
-    # ENVIAR RODADAS EM BLOCOS
-    # ----------------------------------------------------
+    # ====================================================
+    # ENVIAR REGISTROS
+    # ====================================================
 
     bloco = ""
 
-    for i, rodada in enumerate(rodadas, start=1):
+    for i, rodada in enumerate(
+        rodadas,
+        start=1
+    ):
 
-        linha = formatar_rodada(i, rodada)
+        linha = formatar_rodada(
+            i,
+            rodada
+        )
 
-        if len(bloco) + len(linha) + 1 > 3800:
+        if (
+            len(bloco)
+            + len(linha)
+            \+ 1
+            > 3800
+        ):
 
             bot.send_message(
                 message.chat.id,
@@ -320,9 +383,9 @@ try:
             bloco
         )
 
-    # ----------------------------------------------------
+    # ====================================================
     # ESTATÍSTICAS
-    # ----------------------------------------------------
+    # ====================================================
 
     brancos = 0
     vermelhos = 0
@@ -330,30 +393,47 @@ try:
 
     for rodada in rodadas:
 
-        if not isinstance(rodada, dict):
+        if not isinstance(
+            rodada,
+            dict
+        ):
             continue
 
-        resultado = (
-            rodada.get("result")
-            if rodada.get("result") is not None
-            else rodada.get("resultado")
+        resultado = rodada.get(
+            "result"
         )
+
+        if resultado is None:
+
+            resultado = rodada.get(
+                "resultado"
+            )
 
         try:
 
-            numero = int(resultado)
+            numero = int(
+                resultado
+            )
 
             if numero == 0:
+
                 brancos += 1
 
             elif 1 <= numero <= 7:
+
                 vermelhos += 1
 
             elif 8 <= numero <= 14:
+
                 pretos += 1
 
         except Exception:
+
             pass
+
+    # ====================================================
+    # RESUMO
+    # ====================================================
 
     bot.send_message(
         message.chat.id,
@@ -366,14 +446,21 @@ try:
         f"🔴 Vermelhos: {vermelhos}\n"
         f"⚫ Pretos: {pretos}\n"
         "================================"
-        .replace(",", ".")
     )
 
 except Exception as erro:
 
-    print("❌ ERRO AO BUSCAR HISTÓRICO")
-    print(type(erro).__name__)
-    print(str(erro))
+    print(
+        "❌ ERRO AO BUSCAR HISTÓRICO"
+    )
+
+    print(
+        type(erro).__name__
+    )
+
+    print(
+        str(erro)
+    )
 
     traceback.print_exc()
 
@@ -390,29 +477,49 @@ except Exception as erro:
 
 # ============================================================
 
-@app.route("/telegram/webhook", methods=["POST"])
+@app.route(
+"/telegram/webhook",
+methods=["POST"]
+)
 def receber_webhook():
 
 ```
 try:
 
-    json_string = request.get_data().decode("utf-8")
-
-    update = telebot.types.Update.de_json(
-        json_string
+    json_string = (
+        request
+        .get_data()
+        .decode("utf-8")
     )
 
-    bot.process_new_updates([update])
+    update = (
+        telebot.types.Update
+        .de_json(json_string)
+    )
 
-    print("✅ UPDATE DO TELEGRAM RECEBIDO")
+    bot.process_new_updates(
+        [update]
+    )
+
+    print(
+        "✅ UPDATE DO TELEGRAM RECEBIDO"
+    )
 
     return "OK", 200
 
 except Exception as erro:
 
-    print("❌ ERRO NO WEBHOOK")
-    print(type(erro).__name__)
-    print(str(erro))
+    print(
+        "❌ ERRO NO WEBHOOK"
+    )
+
+    print(
+        type(erro).__name__
+    )
+
+    print(
+        str(erro)
+    )
 
     traceback.print_exc()
 
@@ -425,11 +532,17 @@ except Exception as erro:
 
 # ============================================================
 
-@app.route("/", methods=["GET", "HEAD"])
+@app.route(
+"/",
+methods=["GET", "HEAD"]
+)
 def inicio():
 
 ```
-return "Bot webhook de teste online.", 200
+return (
+    "Bot webhook de teste online.",
+    200
+)
 ```
 
 @app.route("/health")
@@ -453,10 +566,22 @@ webhook_url = (
     + "/telegram/webhook"
 )
 
-print("========================================")
-print("CONFIGURANDO WEBHOOK")
-print("URL:", webhook_url)
-print("========================================")
+print(
+    "========================================"
+)
+
+print(
+    "CONFIGURANDO WEBHOOK"
+)
+
+print(
+    "URL:",
+    webhook_url
+)
+
+print(
+    "========================================"
+)
 
 try:
 
@@ -468,14 +593,28 @@ try:
         url=webhook_url
     )
 
-    print("RESULTADO:", resultado)
-    print("✅ WEBHOOK CONFIGURADO")
+    print(
+        "RESULTADO:",
+        resultado
+    )
+
+    print(
+        "✅ WEBHOOK CONFIGURADO"
+    )
 
 except Exception as erro:
 
-    print("❌ ERRO AO CONFIGURAR WEBHOOK")
-    print(type(erro).__name__)
-    print(str(erro))
+    print(
+        "❌ ERRO AO CONFIGURAR WEBHOOK"
+    )
+
+    print(
+        type(erro).__name__
+    )
+
+    print(
+        str(erro)
+    )
 
     traceback.print_exc()
 ```
@@ -491,10 +630,22 @@ if **name** == "**main**":
 ```
 configurar_webhook()
 
-print("========================================")
-print("SERVER STARTED")
-print("PORT:", PORT)
-print("========================================")
+print(
+    "========================================"
+)
+
+print(
+    "SERVER STARTED"
+)
+
+print(
+    "PORT:",
+    PORT
+)
+
+print(
+    "========================================"
+)
 
 app.run(
     host="0.0.0.0",
