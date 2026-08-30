@@ -1,78 +1,67 @@
 import requests
+import time
 
-URL = "https://api.core.public.tipminer.com/v1/double/rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/history"
-
-params = {
-    "limit": 400,
-    "subject": "filter",
-    "isLoadMore": "true",
-    "timezone": "America/Sao_Paulo",
-}
-
-headers = {
-    "Accept": "*/*",
-    "User-Agent": "Mozilla/5.0",
-    "Origin": "https://www.tipminer.com",
-    "Referer": "https://www.tipminer.com/",
-}
+URL = "https://api.core.public.tipminer.com/v1/double/rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/live"
 
 print("========================================")
-print("TESTE HISTÓRICO TIPMINER")
+print("TIPMINER HISTORICAL TEST")
 print("========================================")
 
 try:
     resposta = requests.get(
         URL,
-        params=params,
-        headers=headers,
+        params={
+            "limit": 400,
+            "subject": "filter",
+            "isLoadMore": "true",
+            "t": int(time.time() * 1000),
+            "timezone": "America/Sao_Paulo",
+            "_cb": str(time.time())
+        },
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
+        },
         timeout=30
     )
 
     print("STATUS:", resposta.status_code)
     print("CONTENT-TYPE:", resposta.headers.get("Content-Type"))
-    print()
 
     resposta.raise_for_status()
 
     dados = resposta.json()
 
-    print("TIPO DA RESPOSTA:", type(dados).__name__)
+    print("RESPONSE TYPE:", type(dados).__name__)
 
     if isinstance(dados, list):
-        rodadas = dados
+        print("Rounds received:", len(dados))
 
-    elif isinstance(dados, dict):
-        print("CHAVES:", list(dados.keys()))
+        if len(dados) > 0:
+            print("")
+            print("FIRST RECORD:")
+            print(dados[0])
 
-        rodadas = (
-            dados.get("data")
-            or dados.get("rounds")
-            or dados.get("results")
-            or []
-        )
+            print("")
+            print("LAST RECORD:")
+            print(dados[-1])
 
-    else:
-        rodadas = []
-
-    print("========================================")
-    print("RODADAS RECEBIDAS:", len(rodadas))
-    print("========================================")
-
-    if rodadas:
-        print("\nPRIMEIRO REGISTRO:")
-        print(rodadas[0])
-
-        print("\nÚLTIMO REGISTRO:")
-        print(rodadas[-1])
+        if len(dados) == 400:
+            print("")
+            print("SUCCESS: 400 ROUNDS RECEIVED")
+        else:
+            print("")
+            print("RECEIVED:", len(dados), "ROUNDS")
 
     else:
-        print("❌ Nenhuma rodada encontrada.")
-        print("\nRESPOSTA BRUTA:")
-        print(resposta.text[:5000])
+        print("ERROR: RESPONSE IS NOT A LIST")
+        print(dados)
 
 except Exception as erro:
     print("========================================")
-    print("❌ ERRO")
-    print(type(erro).__name__)
-    print(str(erro))
+    print("FAILED")
+    print("ERROR TYPE:", type(erro).__name__)
+    print("ERROR:", str(erro))
     print("========================================")
+
+print("TEST FINISHED")
