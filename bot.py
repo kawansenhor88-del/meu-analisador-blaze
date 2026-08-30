@@ -1,442 +1,533 @@
 import os
+import json
 import time
-import uuid
-import traceback
+import threading
+from collections import deque
 
 import requests
 import telebot
-from flask import Flask, request
+from flask import Flask
 
 
 # ============================================================
 # CONFIGURAÇÕES
 # ============================================================
 
-PORT = int(os.environ.get("PORT", "10000"))
-
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
-TIPMINER_AUTH_TOKEN = os.environ.get("TIPMINER_AUTH_TOKEN")
-
-TIPMINER_HISTORY_URL = (
-    "https://api.core.public.tipminer.com/"
-    "v1/double/rounds/"
-    "6ee2f33f-7dbf-40ae-b01c-b05368c806ba/"
-    "history"
-)
-
-
-# ============================================================
-# VERIFICAÇÃO
-# ============================================================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TIPMINER_AUTH_TOKEN = os.getenv("TIPMINER_AUTH_TOKEN")
 
 if not TELEGRAM_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN não configurado.")
-
-if not RENDER_EXTERNAL_URL:
-    raise RuntimeError("RENDER_EXTERNAL_URL não configurado.")
+    raise RuntimeError("TELEGRAM_TOKEN not configured.")
 
 if not TIPMINER_AUTH_TOKEN:
-    raise RuntimeError("TIPMINER_AUTH_TOKEN não configurado.")
+    raise RuntimeError("TIPMINER_AUTH_TOKEN not configured.")
 
+
+TIPMINER_HISTORY_URL = (
+    "https://api.core.public.tipminer.com/v1/double/rounds/"
+    "6ee2f33f-7dbf-40ae-b01c-b05368c806ba/history"
+)
+
+TIPMINER_LIVE_URL = (
+    "https://api.core.public.tipminer.com/v1/double/rounds/"
+    "6ee2f33f-7dbf-40ae-b01c-b05368c806ba/live"
+)
+
+MAX_HISTORY = 100000
+
+historico = deque(maxlen=MAX_HISTORY)
+historico_lock = threading.Lock()
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
 app = Flask(__name__)
 
 
 # ============================================================
-# CONVERTER COR
+# CORES
 # ============================================================
 
-def mapear_cor(resultado):
+def converter_cor(numero):
     try:
-        numero = int(resultado)
-
-        if numero == 0:
-            return "⚪ Branco"
-
-        if 1 <= numero <= 7:
-            return "🔴 Vermelho"
-
-        if 8 <= numero <= 14:
-            return "⚫ Preto"
-
-        return "❓ Desconhecido"
-
+        numero = int(numero)
     except Exception:
-        return "❓ Desconhecido"
+        return "Desconhecido"
+
+    if numero == 0:
+        return "Branco"
+
+    if 1 <= numero <= 7:
+        return "Vermelho"
+
+    if 8 <= numero <= 14:
+        return "Preto"
+
+    return "Desconhecido"
 
 
 # ============================================================
-# BUSCAR RODADAS
+# NORMALIZAÇÃO
 # ============================================================
 
-def buscar_rodadas(limite=200):
+def normalizar_rodada(item):
+    if not isinstance(item, dict):
+        return None
 
-    headers = {
-        "Accept": "*/*",
-        "Accept-Language": "pt-BR",
-        "Authorization": f"Bearer {TIPMINER_AUTH_TOKEN}",
-        "Content-Type": "application/json",
-        "Origin": "https://www.tipminer.com",
-        "Referer": "https://www.tipminer.com/",
-        "User-Agent": (
-            "Mozilla/5.0 (Linux; Android 10; K) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/127.0.0.0 Mobile Safari/537.36"
-        ),
+    uuid = (
+        item.get("uuid")
+        or item.get("id")
+        or item.get("rodada_id")
+    )
+
+    resultado = (
+        item.get("result")
+        if item.get("result") is not None
+        else item.get("resultado")
+    )
+
+    instant = (
+        item.get("instant")
+        or item.get("timestamp")
+        or item.get("time")
+    )
+
+    tipo = item.get("type", "DOUBLE")
+
+    if uuid is None or resultado is None:
+        return None
+
+    try:
+        resultado = int(resultado)
+    except Exception:
+        return None
+
+    return {
+        "uuid": str(uuid),
+        "type": str(tipo),
+        "result": resultado,
+        "color": converter_cor(resultado),
+        "instant": instant
     }
+
+
+# ============================================================
+# EXTRAIR RODADAS
+# ============================================================
+
+def extrair_rodadas(data):
+    """
+    Aceita diferentes formatos de resposta JSON.
+
+    O objetivo é NÃO limitar a resposta a 200.
+    """
+
+    resultados = []
+
+    if isinstance(data, list):
+        resultados = data
+
+    elif isinstance(data, dict):
+
+        # Formatos comuns
+        possiveis = [
+            data.get("history"),
+            data.get("rounds"),
+            data.get("data"),
+            data.get("results"),
+            data.get("items"),
+        ]
+
+        for valor in possiveis:
+            if isinstance(valor, list):
+                resultados = valor
+                break
+
+        # Caso a própria resposta seja um objeto contendo
+        # listas dentro de outras propriedades.
+        if not resultados:
+            for valor in data.values():
+                if isinstance(valor, list):
+                    candidatos = [
+                        x for x in valor
+                        if isinstance(x, dict)
+                        and (
+                            "uuid" in x
+                            or "result" in x
+                            or "instant" in x
+                        )
+                    ]
+
+                    if candidatos:
+                        resultados = candidatos
+                        break
+
+    rodadas = []
+
+    for item in resultados:
+        rodada = normalizar_rodada(item)
+
+        if rodada:
+            rodadas.append(rodada)
+
+    return rodadas
+
+
+# ============================================================
+# BUSCAR 400 RODADAS
+# ============================================================
+
+def buscar_historico_400():
+    print("\n========================================")
+    print("📥 BUSCANDO HISTÓRICO DO TIPMINER")
+    print("========================================")
 
     params = {
-        "limit": limite,
+        "limit": 400,
         "subject": "filter",
         "isLoadMore": "true",
-        "timezone": "America/Sao_Paulo",
         "t": int(time.time() * 1000),
-        "_cb": str(uuid.uuid4()),
+        "timezone": "America/Sao_Paulo",
+        "_cb": "bot"
     }
 
+    headers = {
+        "accept": "*/*",
+        "accept-language": "pt-BR",
+        "authorization": f"Bearer {TIPMINER_AUTH_TOKEN}",
+        "content-type": "application/json",
+        "origin": "https://www.tipminer.com",
+        "referer": "https://www.tipminer.com/",
+        "user-agent": (
+            "Mozilla/5.0 (Linux; Android 10; K) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/127.0.0.0 Mobile Safari/537.36"
+        )
+    }
+
+    try:
+
+        resposta = requests.get(
+            TIPMINER_HISTORY_URL,
+            params=params,
+            headers=headers,
+            timeout=30
+        )
+
+        print("🌐 HTTP:", resposta.status_code)
+
+        resposta.raise_for_status()
+
+        data = resposta.json()
+
+        rodadas = extrair_rodadas(data)
+
+        print("📊 RODADAS EXTRAÍDAS:", len(rodadas))
+
+        if rodadas:
+            print(
+                "🔵 PRIMEIRA:",
+                rodadas[0]["uuid"],
+                rodadas[0]["result"],
+                rodadas[0]["color"]
+            )
+
+            print(
+                "🔵 ÚLTIMA:",
+                rodadas[-1]["uuid"],
+                rodadas[-1]["result"],
+                rodadas[-1]["color"]
+            )
+
+        return rodadas
+
+    except Exception as erro:
+
+        print("❌ ERRO AO BUSCAR HISTÓRICO:")
+        print(erro)
+
+        return []
+
+
+# ============================================================
+# SALVAR NO HISTÓRICO EM MEMÓRIA
+# ============================================================
+
+def adicionar_rodadas(rodadas):
+
+    adicionadas = 0
+
+    with historico_lock:
+
+        existentes = {
+            item["uuid"]
+            for item in historico
+            if item.get("uuid")
+        }
+
+        for rodada in rodadas:
+
+            uuid = rodada["uuid"]
+
+            if uuid in existentes:
+                continue
+
+            historico.append(rodada)
+            existentes.add(uuid)
+            adicionadas += 1
+
+    return adicionadas
+
+
+# ============================================================
+# INICIALIZAÇÃO DO HISTÓRICO
+# ============================================================
+
+def carregar_historico():
+
+    print("\n========================================")
+    print("🚀 INICIANDO CARREGAMENTO")
     print("========================================")
-    print("CONSULTANDO TIPMINER")
-    print("LIMIT:", limite)
+
+    rodadas = buscar_historico_400()
+
+    if not rodadas:
+        print("❌ Nenhuma rodada recebida.")
+        return
+
+    adicionadas = adicionar_rodadas(rodadas)
+
+    print("\n========================================")
+    print("📊 RESULTADO")
     print("========================================")
-
-    resposta = requests.get(
-        TIPMINER_HISTORY_URL,
-        params=params,
-        headers=headers,
-        timeout=30,
-    )
-
-    print("HTTP:", resposta.status_code)
-    print("TAMANHO:", len(resposta.content), "bytes")
-    print("CONTENT-TYPE:", resposta.headers.get("content-type"))
-
-    resposta.raise_for_status()
-
-    dados = resposta.json()
-
-    if isinstance(dados, list):
-        print("FORMATO: LISTA")
-        print("REGISTROS RECEBIDOS:", len(dados))
-        return dados
-
-    if isinstance(dados, dict):
-
-        print("FORMATO: OBJETO")
-        print("CHAVES:", list(dados.keys()))
-
-        if isinstance(dados.get("data"), list):
-            print("REGISTROS EM data:", len(dados["data"]))
-            return dados["data"]
-
-        if isinstance(dados.get("rounds"), list):
-            print("REGISTROS EM rounds:", len(dados["rounds"]))
-            return dados["rounds"]
-
-        if isinstance(dados.get("results"), list):
-            print("REGISTROS EM results:", len(dados["results"]))
-            return dados["results"]
-
-    print("FORMATO NÃO RECONHECIDO")
-    return []
+    print("Solicitadas: 400")
+    print("Recebidas:", len(rodadas))
+    print("Adicionadas:", adicionadas)
+    print("Histórico atual:", len(historico))
+    print("========================================\n")
 
 
 # ============================================================
-# FORMATAR RODADA
+# CAPTURA LIVE
 # ============================================================
 
-def formatar_rodada(numero, rodada):
+def processar_live(data):
 
-    if not isinstance(rodada, dict):
-        return f"{numero:04d} | {rodada}"
+    rodada = normalizar_rodada(data)
 
-    resultado = rodada.get("result")
+    if not rodada:
+        return
 
-    if resultado is None:
-        resultado = rodada.get("resultado")
+    adicionadas = adicionar_rodadas([rodada])
 
-    instant = rodada.get("instant", "N/A")
-    uuid_rodada = rodada.get("uuid", "N/A")
-    tipo = rodada.get("type", "N/A")
+    if adicionadas:
+        print(
+            "🎯 NOVA RODADA:",
+            rodada["result"],
+            "|",
+            rodada["color"],
+            "|",
+            rodada["instant"]
+        )
 
-    cor = mapear_cor(resultado)
 
-    return (
-        f"{numero:04d} | "
-        f"Resultado: {resultado} | "
-        f"{cor} | "
-        f"Tipo: {tipo} | "
-        f"Instant: {instant} | "
-        f"ID: {str(uuid_rodada)[:12]}"
-    )
+def capturar_live():
+
+    while True:
+
+        try:
+
+            print("🟢 Conectando ao LIVE do TipMiner...")
+
+            headers = {
+                "accept": "text/event-stream",
+                "authorization": f"Bearer {TIPMINER_AUTH_TOKEN}",
+                "origin": "https://www.tipminer.com",
+                "referer": "https://www.tipminer.com/",
+                "user-agent": (
+                    "Mozilla/5.0 (Linux; Android 10; K) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/127.0.0.0 Mobile Safari/537.36"
+                )
+            }
+
+            resposta = requests.get(
+                TIPMINER_LIVE_URL,
+                headers=headers,
+                stream=True,
+                timeout=60
+            )
+
+            print(
+                "🟢 LIVE conectado. HTTP:",
+                resposta.status_code
+            )
+
+            for linha in resposta.iter_lines(
+                decode_unicode=True
+            ):
+
+                if not linha:
+                    continue
+
+                texto = linha.strip()
+
+                if texto.startswith("data:"):
+
+                    conteudo = texto[5:].strip()
+
+                    try:
+
+                        data = json.loads(conteudo)
+
+                        if isinstance(data, dict):
+
+                            processar_live(data)
+
+                        elif isinstance(data, list):
+
+                            for item in data:
+                                processar_live(item)
+
+                    except Exception:
+                        pass
+
+        except Exception as erro:
+
+            print("⚠️ LIVE desconectado:", erro)
+            print("🔄 Reconectando em 5 segundos...")
+            time.sleep(5)
 
 
 # ============================================================
-# START
+# TELEGRAM
 # ============================================================
 
 @bot.message_handler(commands=["start"])
 def start(message):
 
+    with historico_lock:
+        total = len(historico)
+
     bot.reply_to(
         message,
-        "✅ BOT DE TESTE FUNCIONANDO!\n\n"
-        "Envie:\n\n"
-        "200 rodadas\n"
-        "400 rodadas\n"
-        "1000 rodadas\n"
-        "2000 rodadas"
+        f"🤖 TipMiner online!\n\n"
+        f"📊 Rodadas carregadas: {total}\n"
+        f"🔴 Vermelho: 1–7\n"
+        f"⚫ Preto: 8–14\n"
+        f"⚪ Branco: 0"
     )
 
 
-# ============================================================
-# MENSAGENS
-# ============================================================
+@bot.message_handler(commands=["historico"])
+def comando_historico(message):
 
-@bot.message_handler(func=lambda message: True)
-def receber_mensagem(message):
+    with historico_lock:
+        dados = list(historico)
 
-    texto = (message.text or "").lower().replace(".", "")
-
-    if "rodada" not in texto:
-
+    if not dados:
         bot.reply_to(
             message,
-            "Envie, por exemplo:\n\n"
-            "400 rodadas"
+            "❌ Nenhuma rodada carregada."
         )
-
         return
 
-    if "2000" in texto:
-        limite = 2000
+    ultimas = dados[-20:]
 
-    elif "1000" in texto:
-        limite = 1000
+    texto = "📊 ÚLTIMAS 20 RODADAS\n\n"
 
-    elif "400" in texto:
-        limite = 400
+    for rodada in reversed(ultimas):
 
-    else:
-        limite = 200
+        texto += (
+            f"🎲 {rodada['result']} "
+            f"→ {rodada['color']}\n"
+            f"🕐 {rodada['instant']}\n\n"
+        )
 
-    bot.send_message(
-        message.chat.id,
-        f"🔎 Consultando {limite} rodadas..."
+    bot.reply_to(message, texto)
+
+
+@bot.message_handler(commands=["total"])
+def comando_total(message):
+
+    with historico_lock:
+        total = len(historico)
+
+    bot.reply_to(
+        message,
+        f"📊 TOTAL NO HISTÓRICO\n\n"
+        f"🎲 {total} rodadas"
     )
 
-    try:
-
-        rodadas = buscar_rodadas(limite)
-        quantidade = len(rodadas)
-
-        print("========================================")
-        print("RESULTADO FINAL")
-        print("SOLICITADAS:", limite)
-        print("RECEBIDAS:", quantidade)
-        print("========================================")
-
-        if quantidade == 0:
-
-            bot.send_message(
-                message.chat.id,
-                "⚠️ A API não retornou nenhuma rodada."
-            )
-
-            return
-
-        bot.send_message(
-            message.chat.id,
-            "📊 RESULTADO\n\n"
-            f"Solicitadas: {limite:,}\n"
-            f"Recebidas: {quantidade:,}\n\n"
-            "HTTP: 200"
-        )
-
-        bloco = ""
-
-        for i, rodada in enumerate(rodadas, start=1):
-
-            linha = formatar_rodada(i, rodada)
-
-            if len(bloco) + len(linha) + 1 > 3800:
-
-                bot.send_message(
-                    message.chat.id,
-                    bloco
-                )
-
-                bloco = ""
-                time.sleep(0.3)
-
-            bloco += linha + "\n"
-
-        if bloco:
-
-            bot.send_message(
-                message.chat.id,
-                bloco
-            )
-
-        brancos = 0
-        vermelhos = 0
-        pretos = 0
-
-        for rodada in rodadas:
-
-            if not isinstance(rodada, dict):
-                continue
-
-            resultado = rodada.get("result")
-
-            if resultado is None:
-                resultado = rodada.get("resultado")
-
-            try:
-
-                numero = int(resultado)
-
-                if numero == 0:
-                    brancos += 1
-
-                elif 1 <= numero <= 7:
-                    vermelhos += 1
-
-                elif 8 <= numero <= 14:
-                    pretos += 1
-
-            except Exception:
-                pass
-
-        bot.send_message(
-            message.chat.id,
-            "================================\n"
-            "📊 RESUMO\n"
-            "================================\n"
-            f"Solicitadas: {limite:,}\n"
-            f"Recebidas: {quantidade:,}\n\n"
-            f"⚪ Brancos: {brancos}\n"
-            f"🔴 Vermelhos: {vermelhos}\n"
-            f"⚫ Pretos: {pretos}\n"
-            "================================"
-        )
-
-    except Exception as erro:
-
-        print("❌ ERRO AO BUSCAR HISTÓRICO")
-        print(type(erro).__name__)
-        print(str(erro))
-
-        traceback.print_exc()
-
-        bot.send_message(
-            message.chat.id,
-            "❌ ERRO NO TIPMINER\n\n"
-            f"{type(erro).__name__}: {erro}"
-        )
-
 
 # ============================================================
-# WEBHOOK
+# FLASK
 # ============================================================
 
-@app.route("/telegram/webhook", methods=["POST"])
-def receber_webhook():
+@app.route("/")
+def home():
 
-    try:
+    with historico_lock:
+        total = len(historico)
 
-        json_string = request.get_data().decode("utf-8")
-
-        update = telebot.types.Update.de_json(
-            json_string
-        )
-
-        bot.process_new_updates([update])
-
-        print("✅ UPDATE DO TELEGRAM RECEBIDO")
-
-        return "OK", 200
-
-    except Exception as erro:
-
-        print("❌ ERRO NO WEBHOOK")
-        print(type(erro).__name__)
-        print(str(erro))
-
-        traceback.print_exc()
-
-        return "ERROR", 500
-
-
-# ============================================================
-# HEALTH CHECK
-# ============================================================
-
-@app.route("/", methods=["GET", "HEAD"])
-def inicio():
-    return "Bot webhook de teste online.", 200
+    return {
+        "status": "online",
+        "historico": total
+    }
 
 
 @app.route("/health")
 def health():
-    return "OK", 200
+
+    return {
+        "status": "ok"
+    }
 
 
 # ============================================================
-# WEBHOOK DO TELEGRAM
+# INICIAR
 # ============================================================
 
-def configurar_webhook():
+def iniciar():
 
-    webhook_url = (
-        RENDER_EXTERNAL_URL.rstrip("/")
-        + "/telegram/webhook"
+    carregar_historico()
+
+    thread_live = threading.Thread(
+        target=capturar_live,
+        daemon=True
     )
 
-    print("========================================")
-    print("CONFIGURANDO WEBHOOK")
-    print("URL:", webhook_url)
-    print("========================================")
+    thread_live.start()
 
-    try:
+    print("🤖 Telegram iniciado.")
 
-        bot.remove_webhook()
-        time.sleep(1)
+    bot.infinity_polling(
+        skip_pending=True,
+        timeout=30,
+        long_polling_timeout=30
+    )
 
-        resultado = bot.set_webhook(
-            url=webhook_url
-        )
-
-        print("RESULTADO:", resultado)
-        print("✅ WEBHOOK CONFIGURADO")
-
-    except Exception as erro:
-
-        print("❌ ERRO AO CONFIGURAR WEBHOOK")
-        print(type(erro).__name__)
-        print(str(erro))
-
-        traceback.print_exc()
-
-
-# ============================================================
-# SERVIDOR
-# ============================================================
 
 if __name__ == "__main__":
 
-    configurar_webhook()
+    thread_bot = threading.Thread(
+        target=iniciar,
+        daemon=True
+    )
 
-    print("========================================")
-    print("SERVER STARTED")
-    print("PORT:", PORT)
-    print("========================================")
+    thread_bot.start()
+
+    port = int(os.getenv("PORT", "10000"))
+
+    print(
+        f"🌐 Flask iniciado na porta {port}"
+    )
 
     app.run(
         host="0.0.0.0",
-        port=PORT,
-        debug=False,
-        use_reloader=False,
-        )
+        port=port
+    )
