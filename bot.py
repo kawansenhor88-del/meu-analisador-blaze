@@ -1,9 +1,6 @@
-import requests
-import json
-import logging
-
-# Garante que os logs apareçam no painel do Render se já não estiverem configurados
-logger = logging.getLogger(__name__)
+# ==============================================================================
+# COMANDO TEMPORÁRIO DE TESTE DA API (PODE COLAR DAQUI PARA BAIXO)
+# ==============================================================================
 
 def testar_historico_tipminer(limit_solicitado):
     """
@@ -33,7 +30,6 @@ def testar_historico_tipminer(limit_solicitado):
         if status_code == 200:
             dados = response.json()
             
-            # Garante a captura da lista independente se ela vier envelopada ou direta
             if isinstance(dados, dict) and "data" in dados:
                 lista_rodadas = dados["data"]
             elif isinstance(dados, list):
@@ -45,7 +41,7 @@ def testar_historico_tipminer(limit_solicitado):
             primeiro = lista_rodadas[0] if qtd_real > 0 else None
             ultimo = lista_rodadas[-1] if qtd_real > 0 else None
             
-            # Conversão de cores solicitada (0=Branco, 1–7=Vermelho, 8–14=Preto)
+            # Conversão de cores idêntica à do seu projeto
             def mapear_cor(resultado):
                 try:
                     res = int(resultado)
@@ -69,10 +65,9 @@ def testar_historico_tipminer(limit_solicitado):
             return {"sucesso": False, "status": status_code, "erro": response.text[:150]}
             
     except Exception as e:
-        logger.error(f"Erro no teste da API TipMiner: {str(e)}")
         return {"sucesso": False, "status": "Erro", "erro": str(e)}
 
-# --- HANDLER TEMPORÁRIO PARA O COMANDO TELEGRAM ---
+
 @bot.message_handler(commands=['testeapi'])
 def comando_teste_api(message):
     chat_id = message.chat.id
@@ -93,7 +88,6 @@ def comando_teste_api(message):
             relatorio += f" ├ Qtd Real Recebida: {res['qtd_real']}\n"
             
             if res["qtd_real"] > 0:
-                # Exibe uma parte do UUID e o timestamp para analisarmos a ordem cronológica
                 p_uuid = p.get('uuid', 'N/A')[:8] if p.get('uuid') else 'N/A'
                 u_uuid = u.get('uuid', 'N/A')[:8] if u.get('uuid') else 'N/A'
                 
@@ -109,4 +103,7 @@ def comando_teste_api(message):
         relatorio += "\n"
         
     bot.send_message(chat_id, relatorio, parse_mode="Markdown")
-            
+
+# ==============================================================================
+# FIM DO COMANDO TEMPORÁRIO (PROSSIGA COM O CÓDIGO ORIGINAL ABAIXO)
+# ==============================================================================
