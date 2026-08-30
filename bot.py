@@ -36,7 +36,6 @@ app = Flask(__name__)
 # ============================================================
 
 def mapear_cor(resultado):
-
     try:
         numero = int(resultado)
 
@@ -56,10 +55,10 @@ def mapear_cor(resultado):
 
 
 # ============================================================
-# BUSCAR 200 RODADAS
+# BUSCAR 5.000 RODADAS
 # ============================================================
 
-def buscar_rodadas(limite=200):
+def buscar_rodadas(limite=5000):
 
     headers = {
         "Accept": "application/json, text/plain, */*",
@@ -80,12 +79,19 @@ def buscar_rodadas(limite=200):
         "timezone": "America/Sao_Paulo",
     }
 
+    print("========================================")
+    print("BUSCANDO HISTÓRICO TIPMINER")
+    print("LIMITE:", limite)
+    print("========================================")
+
     resposta = requests.get(
         TIPMINER_HISTORY_URL,
         params=params,
         headers=headers,
-        timeout=30,
+        timeout=60,
     )
+
+    print("STATUS HTTP:", resposta.status_code)
 
     resposta.raise_for_status()
 
@@ -115,7 +121,7 @@ def buscar_rodadas(limite=200):
 def formatar_rodada(numero, rodada):
 
     if not isinstance(rodada, dict):
-        return f"{numero:03d} | {rodada}"
+        return f"{numero:04d} | {rodada}"
 
     resultado = (
         rodada.get("result")
@@ -126,19 +132,17 @@ def formatar_rodada(numero, rodada):
     instant = rodada.get("instant", "N/A")
     uuid = rodada.get("uuid", "N/A")
 
-    cor = mapear_cor(resultado)
-
     return (
-        f"{numero:03d} | "
+        f"{numero:04d} | "
         f"Resultado: {resultado} | "
-        f"{cor} | "
+        f"{mapear_cor(resultado)} | "
         f"Instant: {instant} | "
         f"ID: {str(uuid)[:12]}"
     )
 
 
 # ============================================================
-# COMANDO /START
+# /START
 # ============================================================
 
 @bot.message_handler(commands=["start"])
@@ -146,15 +150,15 @@ def start(message):
 
     bot.reply_to(
         message,
-        "✅ BOT DE TESTE FUNCIONANDO!\n\n"
+        "✅ BOT DE TESTE 5000 FUNCIONANDO!\n\n"
         "Envie:\n"
-        "200 rodadas\n\n"
-        "para consultar as 200 rodadas mais recentes."
+        "5000 rodadas\n\n"
+        "para consultar o histórico."
     )
 
 
 # ============================================================
-# PEDIDO DAS 200 RODADAS
+# PEDIDO DAS 5.000 RODADAS
 # ============================================================
 
 @bot.message_handler(func=lambda message: True)
@@ -162,21 +166,21 @@ def receber_mensagem(message):
 
     texto = (message.text or "").lower()
 
-    if (
-        "200" in texto
-        and "rodada" in texto
-    ):
+    if "5000" in texto and "rodada" in texto:
 
         bot.send_message(
             message.chat.id,
-            "🔎 Buscando as 200 rodadas mais recentes..."
+            "🔎 Buscando as 5.000 rodadas mais recentes...\n"
+            "Aguarde."
         )
 
         try:
 
-            rodadas = buscar_rodadas(200)
+            rodadas = buscar_rodadas(5000)
 
             quantidade = len(rodadas)
+
+            print("RODADAS RECEBIDAS:", quantidade)
 
             if quantidade == 0:
 
@@ -187,20 +191,15 @@ def receber_mensagem(message):
 
                 return
 
-            # ------------------------------------------------
-            # CABEÇALHO
-            # ------------------------------------------------
-
             bot.send_message(
                 message.chat.id,
                 f"✅ API retornou {quantidade} rodadas.\n\n"
-                "📊 Enviando os registros..."
+                "📊 Enviando os registros em blocos..."
             )
 
-            # ------------------------------------------------
-            # TELEGRAM TEM LIMITE DE TAMANHO POR MENSAGEM.
-            # DIVIDIMOS EM BLOCOS.
-            # ------------------------------------------------
+            # =================================================
+            # ENVIAR AS RODADAS
+            # =================================================
 
             bloco = ""
 
@@ -228,9 +227,9 @@ def receber_mensagem(message):
                     bloco
                 )
 
-            # ------------------------------------------------
-            # RESUMO
-            # ------------------------------------------------
+            # =================================================
+            # CONTAGEM DE CORES
+            # =================================================
 
             brancos = 0
             vermelhos = 0
@@ -263,12 +262,16 @@ def receber_mensagem(message):
                 except Exception:
                     pass
 
+            # =================================================
+            # RESUMO
+            # =================================================
+
             bot.send_message(
                 message.chat.id,
                 "================================\n"
                 "📊 RESUMO DO TESTE\n"
                 "================================\n"
-                f"Solicitadas: 200\n"
+                f"Solicitadas: 5000\n"
                 f"Recebidas: {quantidade}\n\n"
                 f"⚪ Brancos: {brancos}\n"
                 f"🔴 Vermelhos: {vermelhos}\n"
@@ -286,22 +289,22 @@ def receber_mensagem(message):
 
             bot.send_message(
                 message.chat.id,
-                "❌ Erro ao consultar a API do TipMiner.\n\n"
+                "❌ Erro ao consultar a API.\n\n"
                 f"{type(erro).__name__}: {erro}"
             )
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # OUTRAS MENSAGENS
-    # --------------------------------------------------------
+    # ========================================================
 
     bot.reply_to(
         message,
         f"✅ Recebi sua mensagem!\n\n"
         f"Você enviou: {message.text}\n\n"
-        "Para testar as rodadas, escreva:\n"
-        "200 rodadas"
+        "Para testar, escreva:\n"
+        "5000 rodadas"
     )
 
 
@@ -343,13 +346,11 @@ def receber_webhook():
 
 @app.route("/", methods=["GET", "HEAD"])
 def inicio():
-
-    return "Bot webhook de teste online.", 200
+    return "Bot webhook de teste 5000 online.", 200
 
 
 @app.route("/health")
 def health():
-
     return "OK", 200
 
 
@@ -409,4 +410,4 @@ if __name__ == "__main__":
         port=PORT,
         debug=False,
         use_reloader=False,
-                )
+    )
