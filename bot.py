@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 import traceback
 import requests
 import telebot
@@ -55,7 +56,7 @@ def mapear_cor(resultado):
 
 
 # ============================================================
-# BUSCAR 5.000 RODADAS
+# BUSCAR HISTÓRICO
 # ============================================================
 
 def buscar_rodadas(limite=5000):
@@ -72,46 +73,115 @@ def buscar_rodadas(limite=5000):
         ),
     }
 
+    # ========================================================
+    # MESMOS PARÂMETROS DA REQUISIÇÃO DO TIPMINER
+    # ========================================================
+
     params = {
         "limit": limite,
         "subject": "filter",
         "isLoadMore": "true",
+
+        # Parâmetro usado pelo TipMiner na requisição capturada
+        "t": int(time.time() * 1000),
+
         "timezone": "America/Sao_Paulo",
+
+        # Cache-busting semelhante ao TipMiner
+        "_cb": str(uuid.uuid4()),
     }
 
     print("========================================")
-    print("BUSCANDO HISTÓRICO TIPMINER")
-    print("LIMITE:", limite)
+    print("TESTE TIPMINER /HISTORY")
     print("========================================")
+    print("Limite solicitado:", limite)
+    print("Parâmetros:", params)
 
-    resposta = requests.get(
-        TIPMINER_HISTORY_URL,
-        params=params,
-        headers=headers,
-        timeout=60,
-    )
+    try:
 
-    print("STATUS HTTP:", resposta.status_code)
+        resposta = requests.get(
+            TIPMINER_HISTORY_URL,
+            params=params,
+            headers=headers,
+            timeout=60,
+        )
 
-    resposta.raise_for_status()
+        print("STATUS HTTP:", resposta.status_code)
 
-    dados = resposta.json()
+        print("URL FINAL:")
+        print(resposta.url)
 
-    if isinstance(dados, dict):
+        if resposta.status_code != 200:
 
-        if isinstance(dados.get("data"), list):
-            return dados["data"]
+            print("❌ API NÃO RETORNOU 200")
+            print("Resposta:", resposta.text[:1000])
 
-        if isinstance(dados.get("rounds"), list):
-            return dados["rounds"]
+            return []
 
-        if isinstance(dados.get("results"), list):
-            return dados["results"]
+        try:
+            dados = resposta.json()
 
-    elif isinstance(dados, list):
-        return dados
+        except Exception:
 
-    return []
+            print("❌ A resposta não é JSON válido.")
+            print("Resposta:", resposta.text[:1000])
+
+            return []
+
+        # ====================================================
+        # IDENTIFICAR LISTA
+        # ====================================================
+
+        if isinstance(dados, dict):
+
+            if isinstance(dados.get("data"), list):
+                rodadas = dados["data"]
+
+            elif isinstance(dados.get("rounds"), list):
+                rodadas = dados["rounds"]
+
+            elif isinstance(dados.get("results"), list):
+                rodadas = dados["results"]
+
+            else:
+                rodadas = []
+
+        elif isinstance(dados, list):
+
+            rodadas = dados
+
+        else:
+
+            rodadas = []
+
+        print("----------------------------------------")
+        print("RODADAS RECEBIDAS:", len(rodadas))
+        print("----------------------------------------")
+
+        return rodadas
+
+    except requests.exceptions.Timeout:
+
+        print("❌ TIMEOUT")
+
+        return []
+
+    except requests.exceptions.RequestException as erro:
+
+        print("❌ ERRO DE CONEXÃO:")
+        print(erro)
+
+        return []
+
+    except Exception as erro:
+
+        print("❌ ERRO INESPERADO:")
+        print(type(erro).__name__)
+        print(str(erro))
+
+        traceback.print_exc()
+
+        return []
 
 
 # ============================================================
@@ -130,14 +200,15 @@ def formatar_rodada(numero, rodada):
     )
 
     instant = rodada.get("instant", "N/A")
-    uuid = rodada.get("uuid", "N/A")
+
+    uuid_rodada = rodada.get("uuid", "N/A")
 
     return (
         f"{numero:04d} | "
         f"Resultado: {resultado} | "
         f"{mapear_cor(resultado)} | "
         f"Instant: {instant} | "
-        f"ID: {str(uuid)[:12]}"
+        f"ID: {str(uuid_rodada)[:12]}"
     )
 
 
@@ -152,13 +223,12 @@ def start(message):
         message,
         "✅ BOT DE TESTE 5000 FUNCIONANDO!\n\n"
         "Envie:\n"
-        "5000 rodadas\n\n"
-        "para consultar o histórico."
+        "5000 rodadas"
     )
 
 
 # ============================================================
-# PEDIDO DAS 5.000 RODADAS
+# MENSAGENS
 # ============================================================
 
 @bot.message_handler(func=lambda message: True)
@@ -170,7 +240,7 @@ def receber_mensagem(message):
 
         bot.send_message(
             message.chat.id,
-            "🔎 Buscando as 5.000 rodadas mais recentes...\n"
+            "🔎 Buscando as 5.000 rodadas...\n"
             "Aguarde."
         )
 
@@ -180,7 +250,11 @@ def receber_mensagem(message):
 
             quantidade = len(rodadas)
 
-            print("RODADAS RECEBIDAS:", quantidade)
+            print("========================================")
+            print("RESULTADO FINAL")
+            print("SOLICITADAS:", 5000)
+            print("RECEBIDAS:", quantidade)
+            print("========================================")
 
             if quantidade == 0:
 
@@ -193,42 +267,36 @@ def receber_mensagem(message):
 
             bot.send_message(
                 message.chat.id,
-                f"✅ API retornou {quantidade} rodadas.\n\n"
-                "📊 Enviando os registros em blocos..."
+                f"📊 Resultado do teste:\n\n"
+                f"Solicitadas: 5000\n"
+                f"Recebidas: {quantidade}\n\n"
+                "Agora vou enviar uma amostra."
             )
 
             # =================================================
-            # ENVIAR AS RODADAS
+            # AMOSTRA
             # =================================================
 
-            bloco = ""
+            amostra = ""
 
-            for i, rodada in enumerate(rodadas, start=1):
+            for i, rodada in enumerate(
+                rodadas[:20],
+                start=1
+            ):
 
-                linha = formatar_rodada(i, rodada)
-
-                if len(bloco) + len(linha) + 1 > 3800:
-
-                    bot.send_message(
-                        message.chat.id,
-                        bloco
-                    )
-
-                    bloco = ""
-
-                    time.sleep(0.3)
-
-                bloco += linha + "\n"
-
-            if bloco:
-
-                bot.send_message(
-                    message.chat.id,
-                    bloco
+                amostra += (
+                    formatar_rodada(i, rodada)
+                    + "\n"
                 )
 
+            bot.send_message(
+                message.chat.id,
+                "📋 PRIMEIRAS 20 RODADAS:\n\n"
+                + amostra
+            )
+
             # =================================================
-            # CONTAGEM DE CORES
+            # RESUMO DAS CORES
             # =================================================
 
             brancos = 0
@@ -260,16 +328,13 @@ def receber_mensagem(message):
                         pretos += 1
 
                 except Exception:
-                    pass
 
-            # =================================================
-            # RESUMO
-            # =================================================
+                    pass
 
             bot.send_message(
                 message.chat.id,
                 "================================\n"
-                "📊 RESUMO DO TESTE\n"
+                "📊 RESUMO\n"
                 "================================\n"
                 f"Solicitadas: 5000\n"
                 f"Recebidas: {quantidade}\n\n"
@@ -281,7 +346,7 @@ def receber_mensagem(message):
 
         except Exception as erro:
 
-            print("❌ ERRO AO BUSCAR HISTÓRICO")
+            print("❌ ERRO:")
             print(type(erro).__name__)
             print(str(erro))
 
@@ -289,22 +354,17 @@ def receber_mensagem(message):
 
             bot.send_message(
                 message.chat.id,
-                "❌ Erro ao consultar a API.\n\n"
+                "❌ Erro no teste:\n\n"
                 f"{type(erro).__name__}: {erro}"
             )
 
         return
 
-    # ========================================================
-    # OUTRAS MENSAGENS
-    # ========================================================
-
     bot.reply_to(
         message,
         f"✅ Recebi sua mensagem!\n\n"
         f"Você enviou: {message.text}\n\n"
-        "Para testar, escreva:\n"
-        "5000 rodadas"
+        "Envie: 5000 rodadas"
     )
 
 
@@ -346,16 +406,18 @@ def receber_webhook():
 
 @app.route("/", methods=["GET", "HEAD"])
 def inicio():
-    return "Bot webhook de teste 5000 online.", 200
+
+    return "Bot webhook teste 5000 online.", 200
 
 
 @app.route("/health")
 def health():
+
     return "OK", 200
 
 
 # ============================================================
-# CONFIGURAR WEBHOOK
+# WEBHOOK TELEGRAM
 # ============================================================
 
 def configurar_webhook():
@@ -410,4 +472,4 @@ if __name__ == "__main__":
         port=PORT,
         debug=False,
         use_reloader=False,
-    )
+        )
