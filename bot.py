@@ -36,6 +36,7 @@ raise RuntimeError("TIPMINER_AUTH_TOKEN não configurado.")
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(**name**)
 
+
 # ============================================================
 
 # CONVERTER COR
