@@ -6,11 +6,26 @@ params = {
     "limit": 5000,
     "subject": "filter",
     "isLoadMore": "true",
-    "timezone": "America/Sao_Paulo"
+    "t": "1788095997510",
+    "timezone": "America/Sao_Paulo",
 }
 
-r = requests.get(url, params=params, timeout=30)
+headers = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Origin": "https://www.tipminer.com",
+    "Referer": "https://www.tipminer.com/",
+    "User-Agent": "Mozilla/5.0",
+}
+
+r = requests.get(url, params=params, headers=headers, timeout=30)
 
 print("Status:", r.status_code)
-print("Quantidade:", len(r.json()))
-print("Primeira rodada:", r.json()[0])
+print("Tipo:", r.headers.get("content-type"))
+
+if r.ok:
+    dados = r.json()
+    print("Quantidade:", len(dados))
+    print("Primeira rodada:", dados[0])
+else:
+    print("Resposta:", r.text[:500])
