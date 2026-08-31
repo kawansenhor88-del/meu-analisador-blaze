@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 import traceback
 import requests
 import telebot
@@ -13,6 +14,7 @@ PORT = int(os.environ.get("PORT", "10000"))
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+TIPMINER_AUTH_TOKEN = os.environ.get("TIPMINER_AUTH_TOKEN")
 
 TIPMINER_HISTORY_URL = (
     "https://api.core.public.tipminer.com/"
@@ -26,6 +28,9 @@ if not TELEGRAM_TOKEN:
 
 if not RENDER_EXTERNAL_URL:
     raise RuntimeError("RENDER_EXTERNAL_URL não configurado.")
+
+if not TIPMINER_AUTH_TOKEN:
+    raise RuntimeError("TIPMINER_AUTH_TOKEN não configurado.")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
@@ -55,20 +60,23 @@ def mapear_cor(resultado):
 
 
 # ============================================================
-# BUSCAR RODADAS
+# BUSCAR HISTÓRICO TIPMINER
 # ============================================================
 
-def buscar_rodadas(limite=1000):
+def buscar_rodadas(limite=5000):
 
     headers = {
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "*/*",
+        "Accept-Language": "pt-BR",
+        "Authorization": f"Bearer {TIPMINER_AUTH_TOKEN}",
+        "Content-Type": "application/json",
         "Origin": "https://www.tipminer.com",
         "Referer": "https://www.tipminer.com/",
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "Mozilla/5.0 (Android 13; Mobile) "
             "AppleWebKit/537.36 "
             "(KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/127.0.0.0 Mobile Safari/537.36"
         ),
     }
 
@@ -76,50 +84,94 @@ def buscar_rodadas(limite=1000):
         "limit": limite,
         "subject": "filter",
         "isLoadMore": "true",
+        "t": int(time.time() * 1000),
         "timezone": "America/Sao_Paulo",
+        "_cb": str(uuid.uuid4()),
     }
 
     print("========================================")
-    print("TIPMINER TEST 1000")
-    print("SOLICITADO:", limite)
+    print("TIPMINER TESTE")
+    print("========================================")
+    print("LIMIT:", limite)
+    print("SUBJECT:", params["subject"])
+    print("IS_LOAD_MORE:", params["isLoadMore"])
+    print("TIMEZONE:", params["timezone"])
+    print("STATUS: aguardando...")
     print("========================================")
 
     resposta = requests.get(
         TIPMINER_HISTORY_URL,
         params=params,
         headers=headers,
-        timeout=30,
+        timeout=60,
     )
 
     print("STATUS:", resposta.status_code)
-    print("CONTENT-TYPE:", resposta.headers.get("content-type"))
+    print(
+        "CONTENT-TYPE:",
+        resposta.headers.get("content-type")
+    )
 
     resposta.raise_for_status()
 
     try:
         dados = resposta.json()
+
     except ValueError:
         print("❌ RESPOSTA NÃO É JSON")
+        print("INÍCIO DA RESPOSTA:")
         print(resposta.text[:1000])
+
         raise RuntimeError(
             "A API do TipMiner não retornou JSON."
         )
 
-    print("RESPONSE TYPE:", type(dados).__name__)
+    print(
+        "RESPONSE TYPE:",
+        type(dados).__name__
+    )
 
     if isinstance(dados, list):
+
+        print(
+            "RECORDS RECEIVED:",
+            len(dados)
+        )
+
         return dados
 
     if isinstance(dados, dict):
 
         if isinstance(dados.get("data"), list):
+
+            print(
+                "RECORDS RECEIVED:",
+                len(dados["data"])
+            )
+
             return dados["data"]
 
         if isinstance(dados.get("rounds"), list):
+
+            print(
+                "RECORDS RECEIVED:",
+                len(dados["rounds"])
+            )
+
             return dados["rounds"]
 
         if isinstance(dados.get("results"), list):
+
+            print(
+                "RECORDS RECEIVED:",
+                len(dados["results"])
+            )
+
             return dados["results"]
+
+    print(
+        "⚠️ FORMATO DE RESPOSTA NÃO RECONHECIDO"
+    )
 
     return []
 
@@ -131,7 +183,7 @@ def buscar_rodadas(limite=1000):
 def formatar_rodada(numero, rodada):
 
     if not isinstance(rodada, dict):
-        return f"{numero:03d} | {rodada}"
+        return f"{numero:04d} | {rodada}"
 
     resultado = (
         rodada.get("result")
@@ -139,22 +191,29 @@ def formatar_rodada(numero, rodada):
         else rodada.get("resultado")
     )
 
-    instant = rodada.get("instant", "N/A")
-    uuid = rodada.get("uuid", "N/A")
+    instant = rodada.get(
+        "instant",
+        "N/A"
+    )
+
+    uuid_rodada = rodada.get(
+        "uuid",
+        "N/A"
+    )
 
     cor = mapear_cor(resultado)
 
     return (
-        f"{numero:03d} | "
+        f"{numero:04d} | "
         f"Resultado: {resultado} | "
         f"{cor} | "
         f"Instant: {instant} | "
-        f"ID: {str(uuid)[:12]}"
+        f"ID: {str(uuid_rodada)[:12]}"
     )
 
 
 # ============================================================
-# COMANDO /START
+# /START
 # ============================================================
 
 @bot.message_handler(commands=["start"])
@@ -162,36 +221,42 @@ def start(message):
 
     bot.reply_to(
         message,
-        "✅ BOT DE TESTE FUNCIONANDO!\n\n"
+        "✅ BOT FUNCIONANDO!\n\n"
         "Envie:\n"
-        "1000 rodadas\n\n"
-        "para consultar as 1000 rodadas mais recentes."
+        "5000 rodadas\n\n"
+        "para consultar o histórico."
     )
 
 
 # ============================================================
-# PEDIDO DAS RODADAS
+# RECEBER MENSAGENS
 # ============================================================
 
 @bot.message_handler(func=lambda message: True)
 def receber_mensagem(message):
 
-    texto = (message.text or "").lower()
+    texto = (
+        message.text or ""
+    ).lower()
 
     if "rodada" in texto:
 
         bot.send_message(
             message.chat.id,
-            "🔎 Buscando as 1000 rodadas mais recentes..."
+            "🔎 Buscando até 5000 rodadas no TipMiner..."
         )
 
         try:
 
-            rodadas = buscar_rodadas(1000)
+            rodadas = buscar_rodadas(5000)
 
             quantidade = len(rodadas)
 
-            print("ROUNDS RECEIVED:", quantidade)
+            print("========================================")
+            print("RESULTADO FINAL")
+            print("SOLICITADAS:", 5000)
+            print("RECEBIDAS:", quantidade)
+            print("========================================")
 
             if quantidade == 0:
 
@@ -204,21 +269,32 @@ def receber_mensagem(message):
 
             bot.send_message(
                 message.chat.id,
-                f"✅ API retornou {quantidade} rodadas.\n\n"
+                f"✅ TipMiner retornou {quantidade} registros.\n\n"
                 "📊 Enviando os registros..."
             )
 
             # =================================================
-            # ENVIAR EM BLOCOS
+            # ENVIAR REGISTROS EM BLOCOS
             # =================================================
 
             bloco = ""
 
-            for i, rodada in enumerate(rodadas, start=1):
+            for i, rodada in enumerate(
+                rodadas,
+                start=1
+            ):
 
-                linha = formatar_rodada(i, rodada)
+                linha = formatar_rodada(
+                    i,
+                    rodada
+                )
 
-                if len(bloco) + len(linha) + 1 > 3800:
+                if (
+                    len(bloco)
+                    + len(linha)
+                    + 1
+                    > 3800
+                ):
 
                     bot.send_message(
                         message.chat.id,
@@ -239,7 +315,7 @@ def receber_mensagem(message):
                 )
 
             # =================================================
-            # RESUMO
+            # CONTAGEM DAS CORES
             # =================================================
 
             brancos = 0
@@ -248,7 +324,10 @@ def receber_mensagem(message):
 
             for rodada in rodadas:
 
-                if not isinstance(rodada, dict):
+                if not isinstance(
+                    rodada,
+                    dict
+                ):
                     continue
 
                 resultado = (
@@ -273,12 +352,16 @@ def receber_mensagem(message):
                 except Exception:
                     pass
 
+            # =================================================
+            # RESUMO
+            # =================================================
+
             bot.send_message(
                 message.chat.id,
                 "================================\n"
                 "📊 RESUMO DO TESTE\n"
                 "================================\n"
-                f"Solicitadas: 1000\n"
+                f"Solicitadas: 5000\n"
                 f"Recebidas: {quantidade}\n\n"
                 f"⚪ Brancos: {brancos}\n"
                 f"🔴 Vermelhos: {vermelhos}\n"
@@ -288,15 +371,22 @@ def receber_mensagem(message):
 
         except Exception as erro:
 
-            print("❌ ERRO AO BUSCAR HISTÓRICO")
-            print(type(erro).__name__)
+            print(
+                "❌ ERRO AO BUSCAR HISTÓRICO"
+            )
+
+            print(
+                type(erro).__name__
+            )
+
             print(str(erro))
 
             traceback.print_exc()
 
             bot.send_message(
                 message.chat.id,
-                "❌ Erro ao consultar a API do TipMiner.\n\n"
+                "❌ Erro ao consultar a API "
+                "do TipMiner.\n\n"
                 f"{type(erro).__name__}: {erro}"
             )
 
@@ -305,8 +395,8 @@ def receber_mensagem(message):
     bot.reply_to(
         message,
         "✅ Recebi sua mensagem!\n\n"
-        "Para testar, escreva:\n"
-        "1000 rodadas"
+        "Para testar o histórico, escreva:\n"
+        "5000 rodadas"
     )
 
 
@@ -314,20 +404,32 @@ def receber_mensagem(message):
 # WEBHOOK
 # ============================================================
 
-@app.route("/telegram/webhook", methods=["POST"])
+@app.route(
+    "/telegram/webhook",
+    methods=["POST"]
+)
 def receber_webhook():
 
     try:
 
-        json_string = request.get_data().decode("utf-8")
-
-        update = telebot.types.Update.de_json(
-            json_string
+        json_string = (
+            request
+            .get_data()
+            .decode("utf-8")
         )
 
-        bot.process_new_updates([update])
+        update = (
+            telebot.types.Update
+            .de_json(json_string)
+        )
 
-        print("✅ UPDATE DO TELEGRAM RECEBIDO")
+        bot.process_new_updates(
+            [update]
+        )
+
+        print(
+            "✅ UPDATE DO TELEGRAM RECEBIDO"
+        )
 
         return "OK", 200
 
@@ -346,10 +448,16 @@ def receber_webhook():
 # HEALTH CHECK
 # ============================================================
 
-@app.route("/", methods=["GET", "HEAD"])
+@app.route(
+    "/",
+    methods=["GET", "HEAD"]
+)
 def inicio():
 
-    return "Bot webhook de teste online.", 200
+    return (
+        "Bot webhook de teste online.",
+        200
+    )
 
 
 @app.route("/health")
@@ -384,13 +492,25 @@ def configurar_webhook():
             url=webhook_url
         )
 
-        print("RESULTADO:", resultado)
-        print("✅ WEBHOOK CONFIGURADO")
+        print(
+            "RESULTADO:",
+            resultado
+        )
+
+        print(
+            "✅ WEBHOOK CONFIGURADO"
+        )
 
     except Exception as erro:
 
-        print("❌ ERRO AO CONFIGURAR WEBHOOK")
-        print(type(erro).__name__)
+        print(
+            "❌ ERRO AO CONFIGURAR WEBHOOK"
+        )
+
+        print(
+            type(erro).__name__
+        )
+
         print(str(erro))
 
         traceback.print_exc()
