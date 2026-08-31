@@ -14,9 +14,6 @@ PORT = int(os.environ.get("PORT", "10000"))
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
-# Token do TipMiner, caso esteja configurado no Render
-TIPMINER_AUTH_TOKEN = os.environ.get("TIPMINER_AUTH_TOKEN")
-
 TIPMINER_HISTORY_URL = (
     "https://api.core.public.tipminer.com/"
     "v1/double/rounds/"
@@ -39,7 +36,6 @@ app = Flask(__name__)
 # ============================================================
 
 def mapear_cor(resultado):
-
     try:
         numero = int(resultado)
 
@@ -66,7 +62,6 @@ def buscar_rodadas(limite=1000):
 
     headers = {
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "pt-BR",
         "Origin": "https://www.tipminer.com",
         "Referer": "https://www.tipminer.com/",
         "User-Agent": (
@@ -77,12 +72,6 @@ def buscar_rodadas(limite=1000):
         ),
     }
 
-    # Se o token existir no Render, envia autorização.
-    if TIPMINER_AUTH_TOKEN:
-        headers["Authorization"] = (
-            f"Bearer {TIPMINER_AUTH_TOKEN}"
-        )
-
     params = {
         "limit": limite,
         "subject": "filter",
@@ -91,9 +80,8 @@ def buscar_rodadas(limite=1000):
     }
 
     print("========================================")
-    print("CONSULTANDO TIPMINER")
-    print("LIMITE SOLICITADO:", limite)
-    print("TOKEN CONFIGURADO:", bool(TIPMINER_AUTH_TOKEN))
+    print("TIPMINER TEST 1000")
+    print("SOLICITADO:", limite)
     print("========================================")
 
     resposta = requests.get(
@@ -105,11 +93,22 @@ def buscar_rodadas(limite=1000):
 
     print("STATUS:", resposta.status_code)
     print("CONTENT-TYPE:", resposta.headers.get("content-type"))
-    print("TAMANHO:", len(resposta.content))
 
     resposta.raise_for_status()
 
-    dados = resposta.json()
+    try:
+        dados = resposta.json()
+    except ValueError:
+        print("❌ RESPOSTA NÃO É JSON")
+        print(resposta.text[:1000])
+        raise RuntimeError(
+            "A API do TipMiner não retornou JSON."
+        )
+
+    print("RESPONSE TYPE:", type(dados).__name__)
+
+    if isinstance(dados, list):
+        return dados
 
     if isinstance(dados, dict):
 
@@ -121,9 +120,6 @@ def buscar_rodadas(limite=1000):
 
         if isinstance(dados.get("results"), list):
             return dados["results"]
-
-    elif isinstance(dados, list):
-        return dados
 
     return []
 
@@ -174,7 +170,7 @@ def start(message):
 
 
 # ============================================================
-# PEDIDO DAS 1000 RODADAS
+# PEDIDO DAS RODADAS
 # ============================================================
 
 @bot.message_handler(func=lambda message: True)
@@ -182,7 +178,7 @@ def receber_mensagem(message):
 
     texto = (message.text or "").lower()
 
-    if "1000" in texto and "rodada" in texto:
+    if "rodada" in texto:
 
         bot.send_message(
             message.chat.id,
@@ -195,7 +191,7 @@ def receber_mensagem(message):
 
             quantidade = len(rodadas)
 
-            print("RODADAS RECEBIDAS:", quantidade)
+            print("ROUNDS RECEIVED:", quantidade)
 
             if quantidade == 0:
 
@@ -206,19 +202,15 @@ def receber_mensagem(message):
 
                 return
 
-            # ------------------------------------------------
-            # CABEÇALHO
-            # ------------------------------------------------
-
             bot.send_message(
                 message.chat.id,
                 f"✅ API retornou {quantidade} rodadas.\n\n"
                 "📊 Enviando os registros..."
             )
 
-            # ------------------------------------------------
+            # =================================================
             # ENVIAR EM BLOCOS
-            # ------------------------------------------------
+            # =================================================
 
             bloco = ""
 
@@ -246,9 +238,9 @@ def receber_mensagem(message):
                     bloco
                 )
 
-            # ------------------------------------------------
+            # =================================================
             # RESUMO
-            # ------------------------------------------------
+            # =================================================
 
             brancos = 0
             vermelhos = 0
@@ -310,15 +302,10 @@ def receber_mensagem(message):
 
         return
 
-    # --------------------------------------------------------
-    # OUTRAS MENSAGENS
-    # --------------------------------------------------------
-
     bot.reply_to(
         message,
         "✅ Recebi sua mensagem!\n\n"
-        f"Você enviou: {message.text}\n\n"
-        "Para testar as rodadas, escreva:\n"
+        "Para testar, escreva:\n"
         "1000 rodadas"
     )
 
