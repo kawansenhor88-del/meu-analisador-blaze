@@ -1,55 +1,430 @@
 import os
+import time
+import traceback
 import requests
+import telebot
+from flask import Flask, request
 
-print("================================")
-print("TIPMINER TEST 1000 - NOVO")
-print("================================")
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
 
-TOKEN = os.getenv("TIPMINER_AUTH_TOKEN")
+PORT = int(os.environ.get("PORT", "10000"))
 
-print("TOKEN ENCONTRADO:", bool(TOKEN))
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
-if not TOKEN:
-    print("ERRO: TIPMINER_AUTH_TOKEN NÃO FOI ENCONTRADO.")
-    raise SystemExit(1)
+# Token do TipMiner, caso esteja configurado no Render
+TIPMINER_AUTH_TOKEN = os.environ.get("TIPMINER_AUTH_TOKEN")
 
-url = "https://api.core.public.tipminer.com/v1/double/rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/history"
+TIPMINER_HISTORY_URL = (
+    "https://api.core.public.tipminer.com/"
+    "v1/double/rounds/"
+    "6ee2f33f-7dbf-40ae-b01c-b05368c806ba/"
+    "history"
+)
 
-params = {
-    "limit": 1000,
-    "subject": "filter",
-    "isLoadMore": "true",
-    "timezone": "America/Sao_Paulo",
-}
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN não configurado.")
 
-headers = {
-    "accept": "*/*",
-    "accept-language": "pt-BR",
-    "authorization": f"Bearer {TOKEN}",
-    "content-type": "application/json",
-    "origin": "https://www.tipminer.com",
-    "referer": "https://www.tipminer.com/",
-    "user-agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
-}
+if not RENDER_EXTERNAL_URL:
+    raise RuntimeError("RENDER_EXTERNAL_URL não configurado.")
 
-try:
-    response = requests.get(
-        url,
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+app = Flask(__name__)
+
+
+# ============================================================
+# CONVERTER COR
+# ============================================================
+
+def mapear_cor(resultado):
+
+    try:
+        numero = int(resultado)
+
+        if numero == 0:
+            return "⚪ Branco"
+
+        if 1 <= numero <= 7:
+            return "🔴 Vermelho"
+
+        if 8 <= numero <= 14:
+            return "⚫ Preto"
+
+        return "❓ Desconhecido"
+
+    except Exception:
+        return "❓ Desconhecido"
+
+
+# ============================================================
+# BUSCAR RODADAS
+# ============================================================
+
+def buscar_rodadas(limite=1000):
+
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pt-BR",
+        "Origin": "https://www.tipminer.com",
+        "Referer": "https://www.tipminer.com/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+
+    # Se o token existir no Render, envia autorização.
+    if TIPMINER_AUTH_TOKEN:
+        headers["Authorization"] = (
+            f"Bearer {TIPMINER_AUTH_TOKEN}"
+        )
+
+    params = {
+        "limit": limite,
+        "subject": "filter",
+        "isLoadMore": "true",
+        "timezone": "America/Sao_Paulo",
+    }
+
+    print("========================================")
+    print("CONSULTANDO TIPMINER")
+    print("LIMITE SOLICITADO:", limite)
+    print("TOKEN CONFIGURADO:", bool(TIPMINER_AUTH_TOKEN))
+    print("========================================")
+
+    resposta = requests.get(
+        TIPMINER_HISTORY_URL,
         params=params,
         headers=headers,
-        timeout=30
+        timeout=30,
     )
 
-    print("STATUS:", response.status_code)
-    print("CONTENT-TYPE:", response.headers.get("content-type"))
-    print("TAMANHO:", len(response.content))
-    print("RESPOSTA:")
-    print(response.text[:1000])
+    print("STATUS:", resposta.status_code)
+    print("CONTENT-TYPE:", resposta.headers.get("content-type"))
+    print("TAMANHO:", len(resposta.content))
 
-except Exception as e:
-    print("ERRO:", repr(e))
-    raise
+    resposta.raise_for_status()
 
-print("================================")
-print("TESTE FINALIZADO")
-print("================================")
+    dados = resposta.json()
+
+    if isinstance(dados, dict):
+
+        if isinstance(dados.get("data"), list):
+            return dados["data"]
+
+        if isinstance(dados.get("rounds"), list):
+            return dados["rounds"]
+
+        if isinstance(dados.get("results"), list):
+            return dados["results"]
+
+    elif isinstance(dados, list):
+        return dados
+
+    return []
+
+
+# ============================================================
+# FORMATAR RODADA
+# ============================================================
+
+def formatar_rodada(numero, rodada):
+
+    if not isinstance(rodada, dict):
+        return f"{numero:03d} | {rodada}"
+
+    resultado = (
+        rodada.get("result")
+        if rodada.get("result") is not None
+        else rodada.get("resultado")
+    )
+
+    instant = rodada.get("instant", "N/A")
+    uuid = rodada.get("uuid", "N/A")
+
+    cor = mapear_cor(resultado)
+
+    return (
+        f"{numero:03d} | "
+        f"Resultado: {resultado} | "
+        f"{cor} | "
+        f"Instant: {instant} | "
+        f"ID: {str(uuid)[:12]}"
+    )
+
+
+# ============================================================
+# COMANDO /START
+# ============================================================
+
+@bot.message_handler(commands=["start"])
+def start(message):
+
+    bot.reply_to(
+        message,
+        "✅ BOT DE TESTE FUNCIONANDO!\n\n"
+        "Envie:\n"
+        "1000 rodadas\n\n"
+        "para consultar as 1000 rodadas mais recentes."
+    )
+
+
+# ============================================================
+# PEDIDO DAS 1000 RODADAS
+# ============================================================
+
+@bot.message_handler(func=lambda message: True)
+def receber_mensagem(message):
+
+    texto = (message.text or "").lower()
+
+    if "1000" in texto and "rodada" in texto:
+
+        bot.send_message(
+            message.chat.id,
+            "🔎 Buscando as 1000 rodadas mais recentes..."
+        )
+
+        try:
+
+            rodadas = buscar_rodadas(1000)
+
+            quantidade = len(rodadas)
+
+            print("RODADAS RECEBIDAS:", quantidade)
+
+            if quantidade == 0:
+
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ A API não retornou nenhuma rodada."
+                )
+
+                return
+
+            # ------------------------------------------------
+            # CABEÇALHO
+            # ------------------------------------------------
+
+            bot.send_message(
+                message.chat.id,
+                f"✅ API retornou {quantidade} rodadas.\n\n"
+                "📊 Enviando os registros..."
+            )
+
+            # ------------------------------------------------
+            # ENVIAR EM BLOCOS
+            # ------------------------------------------------
+
+            bloco = ""
+
+            for i, rodada in enumerate(rodadas, start=1):
+
+                linha = formatar_rodada(i, rodada)
+
+                if len(bloco) + len(linha) + 1 > 3800:
+
+                    bot.send_message(
+                        message.chat.id,
+                        bloco
+                    )
+
+                    bloco = ""
+
+                    time.sleep(0.3)
+
+                bloco += linha + "\n"
+
+            if bloco:
+
+                bot.send_message(
+                    message.chat.id,
+                    bloco
+                )
+
+            # ------------------------------------------------
+            # RESUMO
+            # ------------------------------------------------
+
+            brancos = 0
+            vermelhos = 0
+            pretos = 0
+
+            for rodada in rodadas:
+
+                if not isinstance(rodada, dict):
+                    continue
+
+                resultado = (
+                    rodada.get("result")
+                    if rodada.get("result") is not None
+                    else rodada.get("resultado")
+                )
+
+                try:
+
+                    numero = int(resultado)
+
+                    if numero == 0:
+                        brancos += 1
+
+                    elif 1 <= numero <= 7:
+                        vermelhos += 1
+
+                    elif 8 <= numero <= 14:
+                        pretos += 1
+
+                except Exception:
+                    pass
+
+            bot.send_message(
+                message.chat.id,
+                "================================\n"
+                "📊 RESUMO DO TESTE\n"
+                "================================\n"
+                f"Solicitadas: 1000\n"
+                f"Recebidas: {quantidade}\n\n"
+                f"⚪ Brancos: {brancos}\n"
+                f"🔴 Vermelhos: {vermelhos}\n"
+                f"⚫ Pretos: {pretos}\n"
+                "================================"
+            )
+
+        except Exception as erro:
+
+            print("❌ ERRO AO BUSCAR HISTÓRICO")
+            print(type(erro).__name__)
+            print(str(erro))
+
+            traceback.print_exc()
+
+            bot.send_message(
+                message.chat.id,
+                "❌ Erro ao consultar a API do TipMiner.\n\n"
+                f"{type(erro).__name__}: {erro}"
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # OUTRAS MENSAGENS
+    # --------------------------------------------------------
+
+    bot.reply_to(
+        message,
+        "✅ Recebi sua mensagem!\n\n"
+        f"Você enviou: {message.text}\n\n"
+        "Para testar as rodadas, escreva:\n"
+        "1000 rodadas"
+    )
+
+
+# ============================================================
+# WEBHOOK
+# ============================================================
+
+@app.route("/telegram/webhook", methods=["POST"])
+def receber_webhook():
+
+    try:
+
+        json_string = request.get_data().decode("utf-8")
+
+        update = telebot.types.Update.de_json(
+            json_string
+        )
+
+        bot.process_new_updates([update])
+
+        print("✅ UPDATE DO TELEGRAM RECEBIDO")
+
+        return "OK", 200
+
+    except Exception as erro:
+
+        print("❌ ERRO NO WEBHOOK")
+        print(type(erro).__name__)
+        print(str(erro))
+
+        traceback.print_exc()
+
+        return "ERROR", 500
+
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.route("/", methods=["GET", "HEAD"])
+def inicio():
+
+    return "Bot webhook de teste online.", 200
+
+
+@app.route("/health")
+def health():
+
+    return "OK", 200
+
+
+# ============================================================
+# CONFIGURAR WEBHOOK
+# ============================================================
+
+def configurar_webhook():
+
+    webhook_url = (
+        RENDER_EXTERNAL_URL.rstrip("/")
+        + "/telegram/webhook"
+    )
+
+    print("========================================")
+    print("CONFIGURANDO WEBHOOK")
+    print("URL:", webhook_url)
+    print("========================================")
+
+    try:
+
+        bot.remove_webhook()
+
+        time.sleep(1)
+
+        resultado = bot.set_webhook(
+            url=webhook_url
+        )
+
+        print("RESULTADO:", resultado)
+        print("✅ WEBHOOK CONFIGURADO")
+
+    except Exception as erro:
+
+        print("❌ ERRO AO CONFIGURAR WEBHOOK")
+        print(type(erro).__name__)
+        print(str(erro))
+
+        traceback.print_exc()
+
+
+# ============================================================
+# SERVIDOR
+# ============================================================
+
+if __name__ == "__main__":
+
+    configurar_webhook()
+
+    print("========================================")
+    print("SERVER STARTED")
+    print("PORT:", PORT)
+    print("========================================")
+
+    app.run(
+        host="0.0.0.0",
+        port=PORT,
+        debug=False,
+        use_reloader=False,
+    )
