@@ -7,62 +7,72 @@ PARAMS = {
     "limit": "1000",
     "subject": "filter",
     "isLoadMore": "true",
-    "timezone": "America/Sao_Paulo"
+    "t": "1788133629539",
+    "timezone": "America/Sao_Paulo",
+    "_cb": "59aa192b-a03c-40e6-8838-b470fe4eeb99"
 }
 
 TOKEN = os.getenv("TIPMINER_TOKEN")
 
 HEADERS = {
-    "Accept": "*/*",
-    "Authorization": f"Bearer {TOKEN}",
-    "Origin": "https://www.tipminer.com",
-    "Referer": "https://www.tipminer.com/",
-    "User-Agent": "Mozilla/5.0"
+    "accept": "*/*",
+    "accept-language": "pt-BR",
+    "authorization": "Bearer " + TOKEN,
+    "content-type": "application/json",
+    "origin": "https://www.tipminer.com",
+    "referer": "https://www.tipminer.com/",
+    "user-agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36"
 }
 
-print("================================")
-print("TIPMINER TEST 1000")
-print("================================")
+print("========================================")
+print("TIPMINER - TESTE REAL DE 1000")
+print("========================================")
 
 try:
-    response = requests.get(
+    resposta = requests.get(
         URL,
         params=PARAMS,
         headers=HEADERS,
         timeout=30
     )
 
-    print("STATUS:", response.status_code)
-    print("CONTENT-TYPE:", response.headers.get("content-type"))
+    print("STATUS:", resposta.status_code)
+    print("CONTENT-TYPE:", resposta.headers.get("content-type"))
 
-    response.raise_for_status()
+    dados = resposta.json()
 
-    data = response.json()
+    print("TIPO:", type(dados).__name__)
+    print("REGISTROS RECEBIDOS:", len(dados))
 
-    print("RESPONSE TYPE:", type(data).__name__)
-    print("ROUNDS RECEIVED:", len(data))
+    print("----------------------------------------")
 
-    if len(data) >= 1000:
-        print("")
-        print("SUCCESS!")
-        print("1000 ROUNDS RECEIVED!")
+    if len(dados) == 1000:
+        print("✅ SUCESSO!")
+        print("✅ OS 1000 REGISTROS CHEGARAM!")
 
-        for pos in [0, 99, 100, 199, 299, 399, 499, 599, 699, 799, 899, 999]:
-            r = data[pos]
-
-            print("")
-            print("POSITION:", pos)
-            print("RESULT:", r.get("result"))
-            print("TYPE:", r.get("type"))
-            print("INSTANT:", r.get("instant"))
+    elif len(dados) == 200:
+        print("⚠️ RECEBEU EXATAMENTE 200")
+        print("⚠️ AINDA EXISTE ALGUMA DIFERENÇA NA REQUISIÇÃO.")
 
     else:
-        print("")
-        print("WARNING!")
-        print("EXPECTED: 1000")
-        print("RECEIVED:", len(data))
+        print("⚠️ QUANTIDADE:", len(dados))
+
+    print("----------------------------------------")
+
+    for posicao in [0, 99, 100, 199, 299, 399, 499,
+                    599, 699, 799, 899, 999]:
+
+        if posicao < len(dados):
+            rodada = dados[posicao]
+
+            print("")
+            print("POSIÇÃO:", posicao)
+            print("RESULTADO:", rodada.get("result"))
+            print("TIPO:", rodada.get("type"))
+            print("HORÁRIO:", rodada.get("instant"))
 
 except Exception as erro:
-    print("")
-    print("ERROR:", type(erro).__name__)
-    print("DETAIL:", str(erro))
+    print("========================================")
+    print("ERRO")
+    print(type(erro).__name__)
+    print(str(erro))
