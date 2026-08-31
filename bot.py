@@ -5,10 +5,10 @@ print("================================")
 print("TIPMINER TEST 1000")
 print("================================")
 
-TOKEN = os.getenv("TIPMINER_TOKEN")
+TOKEN = os.getenv("TIPMINER_AUTH_TOKEN")
 
 if not TOKEN:
-    print("ERRO: TIPMINER_TOKEN não configurado no Render.")
+    print("ERRO: TIPMINER_AUTH_TOKEN não configurado no Render.")
     raise SystemExit(1)
 
 url = "https://api.core.public.tipminer.com/v1/double/rounds/6ee2f33f-7dbf-40ae-b01c-b05368c806ba/history"
