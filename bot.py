@@ -1,18 +1,13 @@
+import os
 import time
 import uuid
 import traceback
 import requests
 import telebot
 
-
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
-
-TELEGRAM_TOKEN = "COLOQUE_SEU_TOKEN_AQUI"
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
 
 TIPMINER_HISTORY_URL = (
     "https://api.core.public.tipminer.com/"
