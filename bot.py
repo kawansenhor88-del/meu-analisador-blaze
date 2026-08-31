@@ -10,87 +10,81 @@ PARAMS = {
     "timezone": "America/Sao_Paulo"
 }
 
-print("========================================")
-print("TIPMINER HISTORICAL TEST - 1000")
-print("========================================")
+HEADERS = {
+    "Accept": "*/*",
+    "Origin": "https://www.tipminer.com",
+    "Referer": "https://www.tipminer.com/",
+    "User-Agent": "Mozilla/5.0"
+}
+
+print("======================================")
+print("TIPMINER HISTORICAL TEST")
+print("======================================")
 
 try:
     response = requests.get(
         URL,
         params=PARAMS,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "*/*",
-            "Origin": "https://www.tipminer.com",
-            "Referer": "https://www.tipminer.com/"
-        },
+        headers=HEADERS,
         timeout=30
     )
 
     print("STATUS:", response.status_code)
-    print("CONTENT-TYPE:", response.headers.get("Content-Type"))
+    print("CONTENT-TYPE:", response.headers.get("content-type"))
 
     response.raise_for_status()
 
     data = response.json()
 
     print("RESPONSE TYPE:", type(data).__name__)
+    print("ROUNDS RECEIVED:", len(data))
 
-    if isinstance(data, list):
-
-        print("ROUNDS RECEIVED:", len(data))
-
-        positions = [
-            0, 99, 100, 199,
-            299, 399, 499, 599,
-            699, 799, 899, 999
-        ]
-
-        print("")
-        print("========================================")
-        print("CHECKING POSITIONS")
-        print("========================================")
-
-        for position in positions:
-            if position < len(data):
-                print("")
-                print("POSITION:", position)
-                print(json.dumps(data[position], ensure_ascii=False))
-
-        print("")
-        print("========================================")
-        print("FIRST RECORD")
-        print("========================================")
-
-        if data:
-            print(json.dumps(data[0], ensure_ascii=False))
-
-        print("")
-        print("========================================")
-        print("LAST RECORD")
-        print("========================================")
-
-        if data:
-            print(json.dumps(data[-1], ensure_ascii=False))
-
-        print("")
-        print("========================================")
-        print("FINAL RESULT")
-        print("========================================")
-
-        if len(data) >= 1000:
-            print("SUCCESS: 1000 ROUNDS RECEIVED")
-        else:
-            print("ONLY", len(data), "ROUNDS RECEIVED")
-
-    else:
-        print("ERROR: RESPONSE IS NOT A LIST")
-        print(json.dumps(data, ensure_ascii=False))
-
-except Exception as error:
     print("")
-    print("========================================")
+    print("======================================")
+    print("CHECKING BLOCKS")
+    print("======================================")
+
+    positions = [
+        0, 99,
+        100, 199,
+        200, 299,
+        300, 399,
+        400, 499,
+        500, 599,
+        600, 699,
+        700, 799,
+        800, 899,
+        900, 999
+    ]
+
+    for pos in positions:
+        if pos < len(data):
+            rodada = data[pos]
+
+            print("")
+            print("POSITION:", pos)
+            print("UUID:", rodada.get("uuid"))
+            print("TYPE:", rodada.get("type"))
+            print("RESULT:", rodada.get("result"))
+            print("INSTANT:", rodada.get("instant"))
+
+    print("")
+    print("======================================")
+    print("FINAL RESULT")
+    print("======================================")
+
+    if len(data) == 1000:
+        print("SUCCESS!")
+        print("1000 ROUNDS RECEIVED CORRECTLY.")
+    else:
+        print("WARNING!")
+        print("EXPECTED: 1000")
+        print("RECEIVED:", len(data))
+
+except Exception as erro:
+    print("")
+    print("======================================")
     print("ERROR")
-    print("========================================")
-    print(type(error).__name__)
-    print(str(error))
+    print("======================================")
+    print(type(erro).__name__)
+    print(str(erro))
