@@ -21,7 +21,7 @@ TIPMINER_URL = (
 TIPMINER_PARAMS = {
     "timezone": "America/Sao_Paulo",
     "subject": "filter",
-    "limit": 2000,
+    "limit": 5000,
 }
 
 app = Flask(__name__)
