@@ -5,19 +5,31 @@ import traceback
 import requests
 import telebot
 
+from flask import Flask, request
+
 
 # ============================================================
-# CONFIGURAÇÃO
+# CONFIGURAÇÕES
 # ============================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+PORT = int(os.environ.get("PORT", 10000))
 
 if not TELEGRAM_TOKEN:
-    raise RuntimeError(
-        "A variável TELEGRAM_TOKEN não foi configurada."
-    )
+    raise RuntimeError("TELEGRAM_TOKEN não configurado.")
+
+if not RENDER_EXTERNAL_URL:
+    raise RuntimeError("RENDER_EXTERNAL_URL não configurado.")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+app = Flask(__name__)
+
+
+# ============================================================
+# URL DO HISTORY DO TIPMINER
+# ============================================================
 
 TIPMINER_HISTORY_URL = (
     "https://api.core.public.tipminer.com/"
@@ -34,7 +46,7 @@ def obter_cor(numero):
 
     try:
         numero = int(numero)
-    except:
+    except Exception:
         return "❓"
 
     if numero == 0:
@@ -50,14 +62,13 @@ def obter_cor(numero):
 
 
 # ============================================================
-# PEGAR O NÚMERO DA RODADA
+# PEGAR NÚMERO DA RODADA
 # ============================================================
 
 def obter_numero(rodada):
 
     if isinstance(rodada, dict):
 
-        # roll é o campo utilizado pelo TipMiner.
         campos = [
             "roll",
             "number",
@@ -74,40 +85,40 @@ def obter_numero(rodada):
                 valor = rodada[campo]
 
                 try:
+
                     numero = int(valor)
 
                     if 0 <= numero <= 14:
                         return numero
 
-                except:
+                except Exception:
                     pass
 
     else:
 
         try:
+
             numero = int(rodada)
 
             if 0 <= numero <= 14:
                 return numero
 
-        except:
+        except Exception:
             pass
 
     return None
 
 
 # ============================================================
-# ENCONTRAR A LISTA DE RODADAS NO JSON
+# ENCONTRAR AS RODADAS NO JSON
 # ============================================================
 
 def encontrar_rodadas(dados):
 
     if isinstance(dados, list):
-
         return dados
 
     if not isinstance(dados, dict):
-
         return []
 
     campos = [
@@ -128,10 +139,8 @@ def encontrar_rodadas(dados):
             valor = dados[campo]
 
             if isinstance(valor, list):
-
                 return valor
 
-    # Procura também em estruturas internas
     for valor in dados.values():
 
         if isinstance(valor, (dict, list)):
@@ -139,14 +148,13 @@ def encontrar_rodadas(dados):
             resultado = encontrar_rodadas(valor)
 
             if resultado:
-
                 return resultado
 
     return []
 
 
 # ============================================================
-# ENVIAR OS 200 SEM ESTOURAR O LIMITE DO TELEGRAM
+# ENVIAR OS REGISTROS
 # ============================================================
 
 def enviar_registros(chat_id, linhas):
@@ -158,7 +166,7 @@ def enviar_registros(chat_id, linhas):
         bloco.append(linha)
 
         # 100 registros por mensagem
-        if len(bloco) >= 100:
+        if len(bloco) == 100:
 
             bot.send_message(
                 chat_id,
@@ -167,7 +175,6 @@ def enviar_registros(chat_id, linhas):
 
             bloco = []
 
-    # Envia o restante
     if bloco:
 
         bot.send_message(
@@ -177,7 +184,21 @@ def enviar_registros(chat_id, linhas):
 
 
 # ============================================================
-# COMANDO /TESTE200
+# /START
+# ============================================================
+
+@bot.message_handler(commands=["start"])
+def start(message):
+
+    bot.reply_to(
+        message,
+        "🧪 Teste TipMiner ativo.\n\n"
+        "Use /teste200"
+    )
+
+
+# ============================================================
+# /TESTE200
 # ============================================================
 
 @bot.message_handler(commands=["teste200"])
@@ -185,50 +206,76 @@ def teste200(message):
 
     try:
 
+        print("====================================")
+        print("🧪 TESTE200 INICIADO")
+        print("Chat:", message.chat.id)
+        print("====================================")
+
+        bot.send_message(
+            message.chat.id,
+            "🔎 Consultando o TipMiner..."
+        )
+
         # ----------------------------------------------------
-        # Consulta DIRETA à API
+        # REQUISIÇÃO DIRETA AO HISTORY
         # ----------------------------------------------------
 
         params = {
+
             "limit": 5000,
+
             "subject": "filter",
+
             "isLoadMore": "true",
+
             "t": int(time.time() * 1000),
+
             "timezone": "America/Sao_Paulo",
+
             "_cb": str(uuid.uuid4())
         }
 
         headers = {
+
             "User-Agent": "Mozilla/5.0",
+
             "Accept": "application/json",
+
             "Cache-Control": "no-cache"
         }
 
         resposta = requests.get(
+
             TIPMINER_HISTORY_URL,
+
             params=params,
+
             headers=headers,
+
             timeout=30
         )
 
-        print("====================================")
-        print("TIPMINER HISTORY")
-        print("STATUS:", resposta.status_code)
-        print("====================================")
+        print("STATUS TIPMINER:", resposta.status_code)
 
         # ----------------------------------------------------
-        # Verifica resposta
+        # VERIFICAR HTTP
         # ----------------------------------------------------
 
         if resposta.status_code != 200:
 
             bot.send_message(
+
                 message.chat.id,
+
                 f"❌ TipMiner respondeu HTTP "
                 f"{resposta.status_code}"
             )
 
             return
+
+        # ----------------------------------------------------
+        # JSON
+        # ----------------------------------------------------
 
         dados = resposta.json()
 
@@ -237,7 +284,9 @@ def teste200(message):
         if not rodadas:
 
             bot.send_message(
+
                 message.chat.id,
+
                 "❌ Não encontrei as rodadas "
                 "na resposta do TipMiner."
             )
@@ -247,18 +296,19 @@ def teste200(message):
             return
 
         # ----------------------------------------------------
-        # PEGAR SOMENTE 200 REGISTROS
+        # PEGAR 200 REGISTROS
         # ----------------------------------------------------
 
         rodadas = rodadas[:200]
 
         print(
-            "REGISTROS ENCONTRADOS:",
-            len(rodadas)
+            "✅ TipMiner retornou:",
+            len(rodadas),
+            "registros"
         )
 
         # ----------------------------------------------------
-        # PREPARAR SAÍDA
+        # PREPARAR LISTA
         # ----------------------------------------------------
 
         linhas = []
@@ -272,81 +322,165 @@ def teste200(message):
 
             if numero is None:
 
-                linha = f"{posicao:03d}. ❓"
+                linhas.append(
+                    f"{posicao:03d}. ❓"
+                )
 
             else:
 
-                emoji = obter_cor(numero)
+                linhas.append(
 
-                linha = (
                     f"{posicao:03d}. "
-                    f"{emoji} "
+                    f"{obter_cor(numero)} "
                     f"{numero}"
                 )
 
-            linhas.append(linha)
-
         # ----------------------------------------------------
-        # MENSAGEM INICIAL
+        # AVISO
         # ----------------------------------------------------
 
         bot.send_message(
+
             message.chat.id,
+
             "✅ TipMiner retornou "
             f"{len(rodadas)} registros.\n\n"
             "📊 Enviando os registros..."
         )
 
         # ----------------------------------------------------
-        # ENVIA OS 200 EM BLOCOS
+        # ENVIAR
         # ----------------------------------------------------
 
         enviar_registros(
+
             message.chat.id,
+
             linhas
         )
 
         print("====================================")
-        print("TESTE FINALIZADO")
-        print("TOTAL ENVIADO:", len(rodadas))
+        print("✅ TESTE200 FINALIZADO")
+        print(
+            "TOTAL ENVIADO:",
+            len(rodadas)
+        )
         print("====================================")
 
     except Exception as erro:
 
         print("====================================")
-        print("ERRO NO TESTE200")
-        print(type(erro).__name__)
-        print(str(erro))
+        print("❌ ERRO NO TESTE200")
+        print(
+            type(erro).__name__,
+            str(erro)
+        )
+
         traceback.print_exc()
+
         print("====================================")
 
         try:
 
             bot.send_message(
+
                 message.chat.id,
+
                 "❌ Erro no teste:\n\n"
                 f"{type(erro).__name__}: "
                 f"{str(erro)[:800]}"
             )
 
-        except:
+        except Exception:
             pass
+
+
+# ============================================================
+# WEBHOOK DO TELEGRAM
+# ============================================================
+
+@app.route(
+    "/telegram-webhook",
+    methods=["POST"]
+)
+def telegram_webhook():
+
+    try:
+
+        json_string = request.get_data().decode(
+            "utf-8"
+        )
+
+        update = telebot.types.Update.de_json(
+            json_string
+        )
+
+        bot.process_new_updates(
+            [update]
+        )
+
+        return "OK", 200
+
+    except Exception as erro:
+
+        print("Erro webhook:", erro)
+
+        return "ERROR", 500
+
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.route("/", methods=["GET"])
+def home():
+
+    return "🧪 Teste TipMiner online", 200
+
+
+# ============================================================
+# CONFIGURAR WEBHOOK
+# ============================================================
+
+def configurar_webhook():
+
+    webhook_url = (
+        RENDER_EXTERNAL_URL.rstrip("/")
+        + "/telegram-webhook"
+    )
+
+    print("Configurando webhook:")
+    print(webhook_url)
+
+    resultado = bot.set_webhook(
+        url=webhook_url
+    )
+
+    print(
+        "Webhook configurado:",
+        resultado
+    )
 
 
 # ============================================================
 # INICIAR
 # ============================================================
 
-print("====================================")
-print("🧪 TESTE TIPMINER INICIADO")
-print("Banco: NÃO")
-print("Gemini: NÃO")
-print("SSE: NÃO")
-print("Flask: NÃO")
-print("====================================")
+if __name__ == "__main__":
 
-bot.infinity_polling(
-    skip_pending=True,
-    timeout=30,
-    long_polling_timeout=30
+    print("====================================")
+    print("🧪 BOT DE TESTE TIPMINER")
+    print("====================================")
+
+    print("Banco: NÃO")
+    print("Gemini: NÃO")
+    print("SSE: NÃO")
+    print("Polling: NÃO")
+    print("Webhook: SIM")
+
+    configurar_webhook()
+
+    app.run(
+        host="0.0.0.0",
+        port=PORT
     )
