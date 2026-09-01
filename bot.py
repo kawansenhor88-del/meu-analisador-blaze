@@ -217,7 +217,7 @@ def processar_history(chat_id):
 # WEBHOOK TELEGRAM
 # ============================================================
 
-@app.route("/telegram", methods=["POST"])
+@app.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
 
     try:
