@@ -1163,7 +1163,7 @@ def _preencher_visual_surfe(texto, largura_alvo):
 # ALTERE SOMENTE ESTES DOIS NÚMEROS PARA TESTAR:
 # =========================================================
 ESPACO_APOS_G = 2
-ESPACO_APOS_CHECK = 4
+ESPACO_APOS_CHECK = 2
 
 def _montar_surfe_duas_colunas(registros):
     """Monta as duas colunas do SURF com espaçamento padronizado."""
@@ -1179,7 +1179,7 @@ def _montar_surfe_duas_colunas(registros):
         # Compensação manual usando ㅤ (U+3164).
         # Como ❌G ocupa mais largura que ✅, cada final tem seu próprio ajuste.
         if esquerda.endswith("✅"):
-            separador = "\u200A" * ESPACO_APOS_CHECK
+            separador = "\u3164" * ESPACO_APOS_CHECK
         elif "❌G" in esquerda:
             separador = "\u3164" * ESPACO_APOS_G
         else:
