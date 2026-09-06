@@ -1163,7 +1163,7 @@ def _preencher_visual_surfe(texto, largura_alvo):
 # ALTERE SOMENTE ESTES DOIS NÚMEROS PARA TESTAR:
 # =========================================================
 ESPACO_APOS_G = 2.0
-ESPACO_APOS_CHECK = 3.2
+ESPACO_APOS_CHECK = 3.3
 
 def _montar_surfe_duas_colunas(registros):
     """Monta as duas colunas do SURF com espaçamento padronizado."""
