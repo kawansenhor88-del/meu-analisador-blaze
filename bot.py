@@ -1145,7 +1145,7 @@ def _montar_surfe_duas_colunas(registros):
     for esquerda, direita in zip(vermelho, preto):
         # Entre as colunas: 2 espaços de controle após Gale (❌G1, ❌G2...)
         # e 3 espaços de controle após ❌/✅.
-        separador = "\u2007" * (2 if "❌G" in esquerda else 4)
+        separador = "\u2009" * (2 if "❌G" in esquerda else 4)
         linhas.append(esquerda + separador + direita)
 
     return "\n".join(linhas)
