@@ -1120,7 +1120,7 @@ def _montar_linhas_estrategia_surfe(registros, estrategia):
 
         # Mantém a primeira coluna com largura fixa antes da bolinha:
         # 1 dígito recebe 2 espaços de controle; 2 dígitos recebem 1.
-        espaco_rodada = "\u2007" * (3 if numero < 10 else 1)
+        espaco_rodada = "\u2007" * (1 if numero < 10 else 1)
         espaco_cor = "\u2007" if len(numero_real) == 1 else ""
 
         linha = (
