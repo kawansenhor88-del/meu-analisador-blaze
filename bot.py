@@ -1179,7 +1179,7 @@ def _montar_surfe_duas_colunas(registros):
         # Compensação manual usando ㅤ (U+3164).
         # Como ❌G ocupa mais largura que ✅, cada final tem seu próprio ajuste.
         if esquerda.endswith("✅"):
-            separador = "\u2009" * ESPACO_APOS_CHECK
+            separador = "\u200A" * ESPACO_APOS_CHECK
         elif "❌G" in esquerda:
             separador = "\u3164" * ESPACO_APOS_G
         else:
