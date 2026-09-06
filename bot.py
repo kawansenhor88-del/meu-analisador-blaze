@@ -1164,7 +1164,7 @@ def _montar_surfe_duas_colunas(registros):
     for esquerda, direita in zip(vermelho, preto):
         # Teste isolado: 2 espaços padronizados após o ✅ e 1 após o ❌G.
         if esquerda.endswith("✅"):
-            separador = "\u2007" * 2
+            separador = "\u2007" * 3
         elif "❌G" in esquerda:
             separador = "\u2007"
         else:
