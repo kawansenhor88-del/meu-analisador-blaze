@@ -1146,7 +1146,7 @@ def _montar_surfe_duas_colunas(registros):
         # Mantém o início da segunda coluna no mesmo ponto visual.
         # Linhas com ❌G ocupam mais largura na primeira coluna,
         # então recebem menos espaço; linhas com ✅ recebem mais.
-        separador = "\u2008" * (1 if "❌G" in esquerda else 4)
+        separador = "\u2007" * (1 if "❌G" in esquerda else 4)
         linhas.append(esquerda + separador + direita)
 
     return "\n".join(linhas)
