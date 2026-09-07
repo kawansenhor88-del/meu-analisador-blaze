@@ -1185,7 +1185,7 @@ ESPACO_APOS_CHECK = 3.4
 # Você pode testar 0.2, 0.3, 0.4... sem mexer nas rodadas 09 a 50.
 # Ajustes independentes SOMENTE para as rodadas 01 a 08.
 # Quanto maior, mais a respectiva coluna vai para a direita.
-AJUSTE_01_08_ESQUERDA = 0.2
+AJUSTE_01_08_ESQUERDA = 0.3
 AJUSTE_01_08_DIREITA = 0.2
 
 def _montar_surfe_duas_colunas(registros):
