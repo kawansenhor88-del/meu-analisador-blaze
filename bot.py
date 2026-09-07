@@ -1215,7 +1215,7 @@ AJUSTE_01_08_ANTES_SETA_DIREITA = 0.2
 # Ajuste fino das 8 primeiras rodadas de cada centena:
 # 100–107, 200–207, 300–307 ... 900–907.
 AJUSTE_CENTENA_00_07_ANTES_SETA_ESQUERDA = 0.2
-AJUSTE_CENTENA_00_07_ANTES_SETA_DIREITA = 0.3
+AJUSTE_CENTENA_00_07_ANTES_SETA_DIREITA = 0.2
 
 def _montar_surfe_duas_colunas(registros):
     """Monta as duas colunas do SURF com espaçamento padronizado."""
