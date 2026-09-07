@@ -1175,7 +1175,7 @@ ESPACO_APOS_CHECK = 3.4
 # Ajuste fino SOMENTE das rodadas 01 a 08.
 # 0.1 = um ajuste mínimo para a direita.
 # Você pode testar 0.2, 0.3, 0.4... sem mexer nas rodadas 09 a 50.
-AJUSTE_RODADAS_01_08 = 0.1
+AJUSTE_RODADAS_01_08 = 0.2
 
 def _montar_surfe_duas_colunas(registros):
     """Monta as duas colunas do SURF com espaçamento padronizado."""
