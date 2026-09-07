@@ -1245,7 +1245,7 @@ AJUSTE_CENTENA_00_07_ANTES_SETA_DIREITA = 0.2
 # Só alteram o número que for exatamente a ÚLTIMA rodada selecionada.
 AJUSTE_FINAL_SURF = {
     100:  {"esquerda": 0.0, "direita": 0.0, "separador": 0.0},
-    200:  {"esquerda": 0.0, "direita": 0.0, "separador": 0.0},
+    200:  {"esquerda": -0.2, "direita": -0.2, "separador": 0.0},
     300:  {"esquerda": -0.2, "direita": -0.2, "separador": 0.0},
     400:  {"esquerda": -0.2, "direita": -0.4, "separador": 0.0},
     500:  {"esquerda": -0.2, "direita": -0.4, "separador": 0.0},
