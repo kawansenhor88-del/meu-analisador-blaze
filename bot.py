@@ -1210,7 +1210,7 @@ ESPACO_APOS_CHECK = 3.4
 # Ajustes independentes SOMENTE para as rodadas 01 a 08.
 # Quanto maior, mais a respectiva coluna vai para a direita.
 AJUSTE_01_08_ANTES_SETA_ESQUERDA = 0.2
-AJUSTE_01_08_ANTES_SETA_DIREITA = 0.3
+AJUSTE_01_08_ANTES_SETA_DIREITA = 0.2
 
 # Ajuste fino das 8 primeiras rodadas de cada centena:
 # 100–107, 200–207, 300–307 ... 900–907.
