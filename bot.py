@@ -1245,7 +1245,7 @@ AJUSTE_FINAL_SURF = {
     700:  {"esquerda": -0.2, "direita": -0.4, "separador": 0.0},
     800:  {"esquerda": -0.2, "direita": -0.1, "separador": -0.2},
     900:  {"esquerda": -0.2, "direita": 0.2, "separador": -0.2},
-    1000: {"esquerda": -0.2, "direita": -0.1, "separador": -0.2},
+    1000: {"esquerda": -0.2, "direita": -0.2, "separador": -0.2},
 }
 
 def _montar_surfe_duas_colunas(registros, numero_final_analise=None):
