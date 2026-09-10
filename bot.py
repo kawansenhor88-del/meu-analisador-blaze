@@ -45,7 +45,7 @@ AJUSTES = {
         "AJUSTE_CHECK": 0.0,
     },
     4: {
-        "ALVO_COLUNA": 21.0,
+        "ALVO_COLUNA": 19.0,
         "AJUSTE_G": 0.0,
         "AJUSTE_CHECK": 0.0,
     },
