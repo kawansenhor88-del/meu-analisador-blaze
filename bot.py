@@ -71,7 +71,7 @@ AJUSTES = {
         "APOS_CHECK_ESQUERDA": 0.0,
         "APOS_G_DIREITA": 0.0,
         "APOS_CHECK_DIREITA": 0.0,
-        "ENTRE_COLUNAS": 2.0,
+        "ENTRE_COLUNAS": 2.2,
     },
 }
 
