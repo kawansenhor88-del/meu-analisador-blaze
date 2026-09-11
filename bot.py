@@ -37,7 +37,7 @@ AJUSTES = {
     },
     4: {
         "ALVO_RESULTADO": 11.0,
-        "ALVO_COLUNA_DIREITA": 12.0,
+        "ALVO_COLUNA_DIREITA": 9.0,
     },
 }
 
