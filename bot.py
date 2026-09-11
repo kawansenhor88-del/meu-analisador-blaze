@@ -65,8 +65,8 @@ AJUSTES = {
         "ENTRE_COLUNAS": 2.0,
     },
     4: {
-        "ANTES_SETA_ESQUERDA": -0.5,
-        "ANTES_SETA_DIREITA": 0.1,
+        "ANTES_SETA_ESQUERDA": 0.0,
+        "ANTES_SETA_DIREITA": -0.2,
         "APOS_G_ESQUERDA": 0.2,
         "APOS_CHECK_ESQUERDA": 0.2,
         "APOS_G_DIREITA": 0.2,
