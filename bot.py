@@ -66,12 +66,12 @@ AJUSTES = {
     },
     4: {
         "ANTES_SETA_ESQUERDA": -0.5,
-        "ANTES_SETA_DIREITA": 0.0,
+        "ANTES_SETA_DIREITA": 0.4,
         "APOS_G_ESQUERDA": 0.0,
         "APOS_CHECK_ESQUERDA": 0.0,
         "APOS_G_DIREITA": 0.0,
         "APOS_CHECK_DIREITA": 0.0,
-        "ENTRE_COLUNAS": 2.2,
+        "ENTRE_COLUNAS": 0.0,
     },
 }
 
