@@ -66,7 +66,7 @@ AJUSTES = {
     },
     4: {
         "ANTES_SETA_ESQUERDA": 0.0,
-        "ANTES_SETA_DIREITA": -2.0,
+        "ANTES_SETA_DIREITA": 0.8,
         "APOS_G_ESQUERDA": 0.0,
         "APOS_CHECK_ESQUERDA": 0.0,
         "APOS_G_DIREITA": 0.0,
