@@ -1296,7 +1296,7 @@ def _montar_linhas_estrategia_surfe(registros, estrategia, numero_final_analise=
         ):
             # Faixas 1100–1107, 1200–1207, 1300–1307 e 1400–1407:
             # somente a coluna esquerda recebe 0.2 antes da seta.
-            valor_config = 0.2 if estrategia == "Vermelho" else 0.0
+            valor_config = 0.1 if estrategia == "Vermelho" else 0.0
 
         elif numero >= 100 and (numero % 100) <= 7:
             # Demais faixas 00–07 preservam exatamente o comportamento anterior.
@@ -1461,7 +1461,7 @@ def _montar_surfe_duas_colunas(registros, numero_final_analise=None):
         # Ajuste EXCLUSIVO 1000–1007: move somente a coluna direita
         # mais 0.2 para a esquerda, sem alterar a coluna esquerda.
         if 1000 <= numero_linha <= 1007:
-            valor_separador -= 0.2
+            valor_separador -= 0.1
 
         # A partir de 1008, aproxima um pouco mais SOMENTE a coluna direita.
         if numero_linha >= 1008:
