@@ -1296,7 +1296,7 @@ def _montar_linhas_estrategia_surfe(registros, estrategia, numero_final_analise=
         ):
             # Faixas 1100–1107, 1200–1207, 1300–1307 e 1400–1407:
             # somente a coluna esquerda recebe 0.2 antes da seta.
-            valor_config = 0.2 if estrategia == "Vermelho" else 0.0
+            valor_config = -0.2 if estrategia == "Vermelho" else 0.0
 
         elif numero >= 100 and (numero % 100) <= 7:
             # Demais faixas 00–07 preservam exatamente o comportamento anterior.
