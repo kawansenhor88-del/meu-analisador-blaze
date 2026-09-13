@@ -1289,7 +1289,7 @@ def _montar_linhas_estrategia_surfe(registros, estrategia, numero_final_analise=
             )
 
         elif 1100 <= numero <= 1907 and (numero % 100) <= 7:
-            valor_config = 0.2 if estrategia == "Vermelho" else 0.0
+            valor_config = 0.3 if estrategia == "Vermelho" else 0.0
             if estrategia == "Preto":
                 ajuste_apos_numero_direita = "\u200A" * 1
 
