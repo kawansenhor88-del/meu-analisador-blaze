@@ -1,0 +1,9361 @@
+import unicodedata
+import os
+import base64
+import io
+import json
+import re
+import traceback
+
+# ==============================================================================
+# CONFIGURADOR DE ESTRATÉGIA — estado em memória
+# ==============================================================================
+ESTRATEGIAS_CONFIG = {}
+ESTRATEGIAS_GATILHO_CONFIG = {}
+
+TEXTOS_CANAL_CONFIG = {}
+TEXTOS_CANAL_OWNER_CHAT_ID = None
+
+_TEXTOS_CANAL_PADRAO = {
+    "online": (
+        "📡 SINAIS ONLINE\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🤖 BOT ONLINE\n\n"
+        "📡 MONITORAMENTO INICIADO.\n"
+        "🎯 AGUARDANDO OPORTUNIDADE..."
+    ),
+    "offline": (
+        "📴 SINAIS OFFLINE\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🤖 BOT OFFLINE\n\n"
+        "⏸ MONITORAMENTO INTERROMPIDO."
+    ),
+    "chegando": (
+        "⚠️ CAMINHO ÚNICO CHEGANDO\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🏄 {SURF}\n\n"
+        "🔥 GALE DE GATILHO: {GALE_GATILHO}\n"
+        "📍 GALE ATUAL: {GALE_ATUAL}\n\n"
+        "⏳ CAMINHO EM ANDAMENTO..."
+    ),
+    "cancelado": (
+        "🚫 CAMINHO CANCELADO\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🏄 {SURF}\n\n"
+        "📍 CAMINHO ACERTOU NO {GALE_ATUAL}\n"
+        "🔥 GALE DE GATILHO: {GALE_GATILHO}\n\n"
+        "❌ SINAL NÃO CONFIRMADO."
+    ),
+    "sinal": (
+        "🎯 SINAL CONFIRMADO\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🔥 GALE DE GATILHO: {GALE_GATILHO}\n\n"
+        "📍 ÚLTIMA RODADA: {COR_ULTIMA} {NUMERO_ULTIMA}\n\n"
+        "🎯 ENTRADA PARA {COR_ENTRADA}"
+    ),
+    "green": (
+        "✅ GREEN\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🏆 GREEN {RESULTADO_GALE}\n"
+        "🎯 ENTRADA FINALIZADA COM SUCESSO."
+    ),
+    "loss": (
+        "❌ LOSS\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🛑 OPERAÇÃO FINALIZADA NO {LIMITE_GALE}\n"
+        "📉 LIMITE DE GALES ATINGIDO."
+    ),
+    "gales": (
+        "❌ NÃO BATEU\n\n"
+        "🔥 VAMOS PARA O {GALE}"
+    ),
+}
+
+_TEXTOS_CANAL_META = {
+    "online": ("📡 SINAIS ONLINE", "ESTA É A MENSAGEM ENVIADA AUTOMATICAMENTE AO CANAL QUANDO O BOT É ATIVADO."),
+    "offline": ("📴 SINAIS OFFLINE", "ESTA É A MENSAGEM ENVIADA AUTOMATICAMENTE AO CANAL QUANDO O BOT É PARADO."),
+    "chegando": ("⚠️ CAMINHO ÚNICO CHEGANDO", "ESTA É A MENSAGEM ENVIADA QUANDO UM CAMINHO ÚNICO ESTÁ SE APROXIMANDO DO GALE DE GATILHO."),
+    "cancelado": ("🚫 CAMINHO CANCELADO", "ESTA É A MENSAGEM ENVIADA QUANDO O CAMINHO ACERTA ANTES DE CHEGAR AO GALE DE GATILHO E O SINAL É CANCELADO."),
+    "sinal": ("🎯 SINAL CONFIRMADO", "ESTA É A MENSAGEM ENVIADA QUANDO O CAMINHO ÚNICO REALMENTE CHEGA AO GALE DE GATILHO. A COR E O NÚMERO VÊM SEMPRE DA RODADA REAL MAIS RECENTE."),
+    "green": ("✅ GREEN", "ESTA É A MENSAGEM ENVIADA QUANDO A OPERAÇÃO ACERTA. O DIRETO/G1/G2... É DEFINIDO AUTOMATICAMENTE PELA LÓGICA."),
+    "loss": ("❌ LOSS", "ESTA É A MENSAGEM ENVIADA QUANDO A OPERAÇÃO CHEGA AO LIMITE DE GALES SEM ACERTAR. O LIMITE É DEFINIDO AUTOMATICAMENTE PELA LÓGICA."),
+    "gales": ("🔢 GALES DA OPERAÇÃO", "UM ÚNICO TEXTO É USADO PARA TODOS OS GALES. O BOT TROCA AUTOMATICAMENTE G1, G2, G3... ATÉ O LIMITE CONFIGURADO."),
+}
+
+_TEXTOS_CANAL_REQUIRED = {
+    "online": set(),
+    "offline": set(),
+    "chegando": {"{SURF}", "{GALE_GATILHO}", "{GALE_ATUAL}"},
+    "cancelado": {"{SURF}", "{GALE_GATILHO}", "{GALE_ATUAL}"},
+    "sinal": {"{GALE_GATILHO}", "{COR_ULTIMA}", "{NUMERO_ULTIMA}", "{COR_ENTRADA}"},
+    "green": {"{RESULTADO_GALE}"},
+    "loss": {"{LIMITE_GALE}"},
+    "gales": {"{GALE}"},
+}
+
+def _textos_canal_cfg(chat_id):
+    chat_id = int(chat_id)
+    if chat_id not in TEXTOS_CANAL_CONFIG:
+        TEXTOS_CANAL_CONFIG[chat_id] = {
+            "textos": dict(_TEXTOS_CANAL_PADRAO),
+            "green_imagem": None,  # compatibilidade com configuração antiga
+            "green_imagens": {},   # 0=DIRETO, 1=G1, 2=G2...
+            "loss_imagem": None,
+        }
+    else:
+        # Migração leve para quem já estava usando a versão anterior.
+        TEXTOS_CANAL_CONFIG[chat_id].setdefault("green_imagens", {})
+    return TEXTOS_CANAL_CONFIG[chat_id]
+
+def _texto_canal_modelo(chat_id, chave):
+    return _textos_canal_cfg(chat_id)["textos"].get(chave, _TEXTOS_CANAL_PADRAO[chave])
+
+def _render_texto_canal(chat_id, chave, **dados):
+    modelo = _texto_canal_modelo(chat_id, chave)
+    for nome, valor in dados.items():
+        modelo = modelo.replace("{" + nome + "}", str(valor))
+    # O padrão aprovado para as mensagens públicas do canal é MAIÚSCULO.
+    return modelo.upper()
+
+def _chat_textos_ativo():
+    if TEXTOS_CANAL_OWNER_CHAT_ID is not None:
+        return TEXTOS_CANAL_OWNER_CHAT_ID
+    if TEXTOS_CANAL_CONFIG:
+        return next(reversed(TEXTOS_CANAL_CONFIG))
+    return None
+
+
+def _estrategia_padrao():
+    return {
+        "gale_gatilho": None,
+        "surf": None,
+        "limite_gales": None,
+        "aviso_antes": None,
+        "ativa": False,
+        "pausada": False,
+        "relatorio_qtd": 0,
+        "relatorio_texto": None,
+        "relatorio_bloco": [],
+        "relatorio_anterior": None,
+        "relatorio_geral_blocos": 0,
+        "relatorio_geral_sinais": 0,
+        "relatorio_geral_greens": 0,
+        "relatorio_geral_saldo": 0,
+    }
+
+def _cfg(chat_id):
+    chat_id = int(chat_id)
+    if chat_id not in ESTRATEGIAS_CONFIG:
+        ESTRATEGIAS_CONFIG[chat_id] = _estrategia_padrao()
+    return ESTRATEGIAS_CONFIG[chat_id]
+
+
+def _estrategia_gatilho_padrao():
+    return {
+        "gale_gatilho": None,
+        "surf": None,
+        "limite_gales": None,
+        "ativa": False,
+        "pausada": False,
+        "green_imagens": {},
+        "loss_imagem": None,
+        "aviso_antes": 2,
+        "relatorio_qtd": 0,
+        "relatorio_texto": None,
+        "relatorio_bloco": [],
+        "relatorio_anterior": None,
+        "relatorio_geral_blocos": 0,
+        "relatorio_geral_sinais": 0,
+        "relatorio_geral_greens": 0,
+        "relatorio_geral_saldo": 0,
+    }
+
+def _cfg_gatilho(chat_id):
+    chat_id = int(chat_id)
+    if chat_id not in ESTRATEGIAS_GATILHO_CONFIG:
+        ESTRATEGIAS_GATILHO_CONFIG[chat_id] = _estrategia_gatilho_padrao()
+    return ESTRATEGIAS_GATILHO_CONFIG[chat_id]
+
+def _surf_nome(valor):
+    if valor is None:
+        return "NÃO CONFIGURADO"
+    return {
+        "vermelho": "🔴 SURF 2 VERMELHOS",
+        "preto": "⚫ SURF 2 PRETOS",
+        "ambos": "🔴⚫ OS DOIS",
+    }.get(valor, "NÃO CONFIGURADO")
+
+import threading
+import time
+from collections import deque
+from datetime import datetime, timezone, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
+import requests
+import telebot
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from flask import Flask, request
+from google import genai
+from google.genai import types
+
+
+# ==============================================================================
+# CONFIGURAÇÕES
+# ==============================================================================
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GEMINI_KEY = os.environ.get("GEMINI_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+TIPMINER_TOKEN = os.environ.get("TIPMINER_TOKEN")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+PORT = int(os.environ.get("PORT", "10000"))
+
+# Canal privado usado exclusivamente para os alertas do SURF ao vivo.
+ALERTAS_CHAT_ID = -1004360291159
+
+# Evita atualizar/regravar as 2.000 rodadas a cada mensagem do Telegram.
+# A base continua sendo exclusivamente a janela de 2.000 do endpoint /history.
+HISTORY_REFRESH_SECONDS = 30
+
+TIPMINER_URL = (
+    "https://api.core.public.tipminer.com/v1/double/rounds/"
+    "6ee2f33f-7dbf-40ae-b01c-b05368c806ba/history"
+)
+
+ANALYSIS_ROUNDS = 2000
+MAX_HISTORY = ANALYSIS_ROUNDS
+
+TIPMINER_PARAMS = {
+    "timezone": "America/Sao_Paulo",
+    "subject": "filter",
+    "limit": ANALYSIS_ROUNDS,
+}
+
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("ERRO: variável TELEGRAM_TOKEN não configurada.")
+
+if not GEMINI_KEY:
+    raise RuntimeError("ERRO: variável GEMINI_KEY não configurada.")
+
+if not DATABASE_URL:
+    raise RuntimeError("ERRO: variável DATABASE_URL não configurada.")
+
+if not TIPMINER_TOKEN:
+    raise RuntimeError("ERRO: variável TIPMINER_TOKEN não configurada.")
+
+
+# ==============================================================================
+# SERVIÇOS
+# ==============================================================================
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+surfe_mensagens_abertas = {}
+surfe_cache = {}
+controle_geral_surfe_cache = {}
+
+# Controle do monitoramento ao vivo do canal de alertas.
+# Começa DESLIGADO para não criar consultas em segundo plano sem o usuário pedir.
+alertas_surfe_ativos = False
+alertas_surfe_lock = threading.RLock()
+CAMINHO_AO_VIVO_LIMITE = 99
+caminho_ao_vivo_marcas = {}
+alertas_surfe_thread = None
+alertas_surfe_ultima_rodada_id = None
+alertas_surfe_modo = None  # "Preto", "Vermelho" ou "Ambos"
+alertas_surfe_historico = []  # janela cronológica das 2.000 rodadas
+alertas_surfe_operacoes = {}  # sinais G9 ainda em andamento
+alertas_surfe_sinais_emitidos = set()
+alertas_surfe_caminhos_unicos_emitidos = set()  # sequências reais já sinalizadas nesta sessão
+alertas_surfe_inicio_monitor_id = None
+alertas_surfe_prealerta = None
+alertas_surfe_registro = deque(maxlen=50)
+
+# Registros da sessão ONLINE atual.
+# Não são preenchidos retroativamente: ao ligar o monitor, a sessão começa
+# da rodada mais recente e estes registros são zerados.
+alertas_surfe_registro_sinais = deque(maxlen=200)
+alertas_surfe_registro_sinais_seq = 0
+alertas_surfe_registro_sinais_vistos_chat = {}
+alertas_surfe_stats = {
+    "green": 0,
+    "loss": 0,
+    "direto": 0,
+    "gales": {n: 0 for n in range(1, 7)},
+}
+# Diagnóstico do monitor: permite saber que ele continua lendo as rodadas
+# mesmo quando ainda não apareceu nenhum G9.
+alertas_surfe_status_ultimo_envio = 0.0
+alertas_surfe_ultima_rodada_detectada = None
+alertas_surfe_ultimo_atraso = None
+alertas_surfe_total_novas = 0
+
+ALERTAS_SURF_INTERVALO = 5
+ALERTAS_SURF_STATUS_INTERVALO = 1800  # 30 minutos
+ALERTAS_SURF_GATILHO = 9
+ALERTAS_SURF_STOP_GALE = 6
+ALERTAS_SURF_AVISO_ANTES = 2
+ALERTAS_MODO_ESTRATEGIA = "surf"
+alertas_gatilho_nivel_aposta = 0
+alertas_gatilho_status_message_id = None
+alertas_gatilho_espera_message_id = None
+alertas_gatilho_chegando_message_id = None
+alertas_gatilho_caminho_message_id = None
+alertas_gatilho_entrada_message_id = None
+alertas_gatilho_caminho_resultados = []
+alertas_gatilho_prealerta = None
+alertas_gatilho_total_greens = 0
+alertas_gatilho_total_loss = 0
+
+# Cartões GREEN/LOSS aprovados, compactados e embutidos no próprio .py.
+_ALERTA_CARDS_B64 = {
+    "direto": "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",
+    "gale1": "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",
+    "gale2": "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",
+    "gale3": "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",
+    "gale4": "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",
+    "gale5": "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",
+    "gale6": "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",
+    "loss": "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",
+}
+
+client = genai.Client(api_key=GEMINI_KEY)
+app = Flask(__name__)
+
+
+# ==============================================================================
+# HISTÓRICO EM MEMÓRIA
+# ==============================================================================
+
+historico_double = deque(maxlen=MAX_HISTORY)
+historico_lock = threading.Lock()
+ultima_rodada_id = None
+historico_atualizacao_lock = threading.Lock()
+ultima_atualizacao_historico = 0.0
+
+
+# ==============================================================================
+# HISTÓRICO ATUALIZADO DO TIPMINER
+# ==============================================================================
+
+def buscar_historico_tipminer():
+    headers = {
+        "accept": "*/*",
+        "accept-language": "pt-BR",
+        "content-type": "application/json",
+        "authorization": f"Bearer {TIPMINER_TOKEN}",
+        "origin": "https://www.tipminer.com",
+        "referer": "https://www.tipminer.com/",
+        "user-agent": "Mozilla/5.0",
+    }
+
+    resposta = requests.get(
+        TIPMINER_URL,
+        params=TIPMINER_PARAMS,
+        headers=headers,
+        timeout=30,
+    )
+    print("TIPMINER HISTORY HTTP:", resposta.status_code)
+    resposta.raise_for_status()
+    dados = resposta.json()
+
+    if isinstance(dados, list):
+        return dados
+    if isinstance(dados, dict):
+        for valor in dados.values():
+            if isinstance(valor, list):
+                return valor
+    return None
+
+
+def normalizar_rodada_historica(item):
+    if not isinstance(item, dict):
+        return None
+    resultado = item.get("result")
+    instant = item.get("instant") or item.get("created_at")
+    color = item.get("color") or item.get("colour")
+    # No histórico do Double, o número é a fonte principal da cor:
+    # 0 = Branco, 1-7 = Vermelho, 8-14 = Preto.
+    numero = resultado
+    if numero is None:
+        numero = item.get("roll")
+    if numero is None:
+        numero = item.get("number")
+    tipo = str(item.get("type") or "DOUBLE").upper()
+    cor = converter_cor(numero)
+    if cor not in ("Vermelho", "Preto", "Branco"):
+        cor = cor_por_tipo(tipo, resultado=resultado, color=color)
+    if cor not in ("Vermelho", "Preto", "Branco"):
+        return None
+    rodada_id = item.get("id") or item.get("uuid") or instant
+    if rodada_id is None:
+        rodada_id = f"{instant}|{cor}|{numero}"
+    return {
+        "rodada_id": str(rodada_id),
+        "tempo": converter_horario(instant) or str(item.get("tempo") or ""),
+        "resultado": cor,
+        "numero": numero,
+        "instant": instant,
+        "tipo": tipo,
+    }
+
+
+def atualizar_historico_tipminer(forcar=False):
+    """
+    Atualiza a janela fixa de 2.000 rodadas do endpoint /history.
+
+    IMPORTANTE:
+    - Não usa SSE.
+    - Não adiciona rodadas ao banco por fora.
+    - Não apaga uma base válida se a API falhar ou retornar menos de 2.000.
+    - Consultas normais do Telegram reutilizam a última carga por até
+      HISTORY_REFRESH_SECONDS segundos, evitando lentidão.
+    """
+    global ultima_atualizacao_historico
+
+    agora = time.time()
+
+    with historico_atualizacao_lock:
+        if not forcar and (agora - ultima_atualizacao_historico) < HISTORY_REFRESH_SECONDS:
+            total_atual = contar_rodadas_banco()
+            if total_atual == ANALYSIS_ROUNDS:
+                return total_atual
+
+        print("========================================")
+        print("ATUALIZANDO AS 2.000 RODADAS DO TIPMINER")
+        print("SEM SSE — HISTORY COMO FONTE")
+        print("========================================")
+
+        dados = buscar_historico_tipminer()
+    if not dados:
+        raise RuntimeError("A API do TipMiner não retornou histórico.")
+
+    rodadas = []
+    vistos = set()
+    for item in dados:
+        rodada = normalizar_rodada_historica(item)
+        if not rodada or rodada["rodada_id"] in vistos:
+            continue
+        vistos.add(rodada["rodada_id"])
+        rodadas.append(rodada)
+
+    if len(rodadas) < ANALYSIS_ROUNDS:
+        raise RuntimeError(
+            f"API retornou apenas {len(rodadas)} rodadas válidas; "
+            f"esperado: {ANALYSIS_ROUNDS}."
+        )
+
+    # Ordena pela data/hora e mantém as 2.000 MAIS RECENTES.
+    rodadas = sorted(rodadas, key=_ordem_temporal)[-ANALYSIS_ROUNDS:]
+
+    conn = conectar_banco()
+    try:
+        cursor = conn.cursor()
+        # Só limpamos depois de validar a nova carga. A transação garante que
+        # um erro durante a inserção devolva o banco ao estado anterior.
+        cursor.execute("DELETE FROM double_rounds")
+
+        for rodada in rodadas:
+            cursor.execute(
+                """
+                INSERT INTO double_rounds
+                (rodada_id, tempo, resultado, numero, instant, tipo, criado_em)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (rodada_id) DO UPDATE SET
+                    tempo=EXCLUDED.tempo, resultado=EXCLUDED.resultado,
+                    numero=EXCLUDED.numero, instant=EXCLUDED.instant,
+                    tipo=EXCLUDED.tipo
+                """,
+                (
+                    rodada["rodada_id"],
+                    rodada["tempo"],
+                    rodada["resultado"],
+                    str(rodada["numero"]) if rodada["numero"] is not None else None,
+                    str(rodada["instant"]) if rodada["instant"] is not None else None,
+                    rodada["tipo"],
+                    datetime.now(timezone.utc),
+                ),
+            )
+
+        conn.commit()
+
+        # Garantia absoluta: a tabela nunca fica com mais de 2.000 registros.
+        cursor.execute(
+            """
+            DELETE FROM double_rounds
+            WHERE id NOT IN (
+                SELECT id
+                FROM double_rounds
+                ORDER BY id DESC
+                LIMIT %s
+            )
+            """,
+            (ANALYSIS_ROUNDS,),
+        )
+        conn.commit()
+
+        cursor.execute("SELECT COUNT(*) FROM double_rounds")
+        total_final = cursor.fetchone()[0]
+        if total_final != ANALYSIS_ROUNDS:
+            raise RuntimeError(
+                f"Banco ficou com {total_final} rodadas; esperado: {ANALYSIS_ROUNDS}."
+            )
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    carregar_historico_banco()
+    total = contar_rodadas_banco()
+
+    print("RODADAS RECEBIDAS PELA API:", len(dados))
+    print("RODADAS VÁLIDAS:", len(rodadas))
+    print("TOTAL ATUAL NO POSTGRESQL:", total)
+
+    if total != ANALYSIS_ROUNDS:
+        raise RuntimeError(
+            f"Banco ficou com {total} rodadas; esperado: {ANALYSIS_ROUNDS}."
+        )
+
+    ultima_atualizacao_historico = time.time()
+    return total
+
+
+def carregar_historico_fixo_tipminer():
+    """Carga inicial obrigatória da janela fixa de 2.000 rodadas."""
+    return atualizar_historico_tipminer(forcar=True)
+
+
+# ==============================================================================
+# BANCO POSTGRESQL / SUPABASE
+# ==============================================================================
+
+def conectar_banco():
+    return psycopg2.connect(
+        DATABASE_URL,
+        sslmode="require",
+        connect_timeout=30,
+    )
+
+
+def inicializar_banco():
+    conn = conectar_banco()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS double_rounds (
+                id BIGSERIAL PRIMARY KEY,
+                rodada_id TEXT UNIQUE,
+                tempo TEXT,
+                resultado TEXT,
+                numero TEXT,
+                instant TEXT,
+                tipo TEXT NOT NULL DEFAULT 'DOUBLE',
+                criado_em TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_double_rounds_instant
+            ON double_rounds(instant)
+            """
+        )
+        conn.commit()
+        print("========================================")
+        print("BANCO POSTGRESQL / SUPABASE INICIALIZADO")
+        print("LIMITE DE RODADAS:", MAX_HISTORY)
+        print("========================================")
+    except Exception:
+        conn.rollback()
+        print("ERRO AO INICIALIZAR POSTGRESQL:")
+        traceback.print_exc()
+        raise
+    finally:
+        conn.close()
+
+
+def carregar_historico_banco():
+    global ultima_rodada_id
+
+    conn = conectar_banco()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            SELECT rodada_id, tempo, resultado, numero, instant, tipo
+            FROM double_rounds
+            ORDER BY id DESC
+            LIMIT %s
+            """
+            , (MAX_HISTORY,)
+        )
+        linhas = cursor.fetchall()
+
+        with historico_lock:
+            historico_double.clear()
+            for linha in reversed(linhas):
+                historico_double.append(
+                    {
+                        "tempo": linha["tempo"],
+                        "resultado": linha["resultado"],
+                        "numero": linha["numero"],
+                        "instant": linha["instant"],
+                        "tipo": linha["tipo"],
+                    }
+                )
+
+        if linhas:
+            ultima_rodada_id = str(linhas[0]["rodada_id"])
+
+        print("========================================")
+        print("HISTÓRICO CARREGADO DO POSTGRESQL")
+        print("RODADAS RECUPERADAS:", len(linhas))
+        print("========================================")
+        return len(linhas)
+    finally:
+        conn.close()
+
+
+# A base é fixa: nenhuma rodada individual é salva. Somente atualizar_historico_tipminer() substitui a janela de 2.000.
+
+def contar_rodadas_banco():
+    conn = conectar_banco()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM double_rounds")
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def obter_historico_banco(limite=None):
+    conn=conectar_banco()
+    try:
+        cursor=conn.cursor(cursor_factory=RealDictCursor)
+        if limite is None:
+            cursor.execute("""SELECT rodada_id,tempo,resultado,numero,instant,tipo,criado_em
+                              FROM double_rounds ORDER BY id DESC""")
+        else:
+            cursor.execute("""SELECT rodada_id,tempo,resultado,numero,instant,tipo,criado_em
+                              FROM double_rounds ORDER BY id DESC LIMIT %s""",(int(limite),))
+        linhas=cursor.fetchall()
+        return [{"rodada_id":str(x["rodada_id"]) if x["rodada_id"] is not None else None,
+                 "tempo":x["tempo"],"resultado":x["resultado"],"numero":x["numero"],
+                 "instant":x["instant"],"tipo":x["tipo"],
+                 "criado_em":x["criado_em"].isoformat() if x["criado_em"] else None}
+                for x in linhas]
+    finally:
+        conn.close()
+
+def obter_ultimo_por_cor(cor):
+    conn=conectar_banco()
+    try:
+        cursor=conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""SELECT rodada_id,tempo,resultado,numero,instant,tipo
+                          FROM double_rounds
+                          WHERE LOWER(resultado)=LOWER(%s)
+                          ORDER BY id DESC LIMIT 1""",(cor,))
+        x=cursor.fetchone()
+        if not x: return None
+        return {"rodada_id":str(x["rodada_id"]) if x["rodada_id"] is not None else None,"tempo":x["tempo"],
+                "resultado":x["resultado"],"numero":x["numero"],
+                "instant":x["instant"],"tipo":x["tipo"]}
+    finally:
+        conn.close()
+
+
+# ==============================================================================
+# CONVERSORES
+# ==============================================================================
+
+def converter_horario(valor):
+    if not valor:
+        return None
+    try:
+        texto = str(valor)
+        if texto.endswith("Z"):
+            texto = texto[:-1] + "+00:00"
+        dt = datetime.fromisoformat(texto)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone(timedelta(hours=-3)))
+        return dt.strftime("%H:%M:%S")
+    except Exception:
+        return str(valor)
+
+
+def converter_cor(valor):
+    if valor is None:
+        return None
+    try:
+        numero = int(valor)
+        if numero == 0:
+            return "Branco"
+        if 1 <= numero <= 7:
+            return "Vermelho"
+        if 8 <= numero <= 14:
+            return "Preto"
+    except Exception:
+        pass
+
+    texto = str(valor).strip().lower()
+    if texto in ("white", "branco"):
+        return "Branco"
+    if texto in ("red", "vermelho"):
+        return "Vermelho"
+    if texto in ("black", "preto"):
+        return "Preto"
+    return str(valor)
+
+
+def cor_por_tipo(tipo, resultado=None, color=None):
+    t = str(tipo or "").upper()
+    if t == "LUCKY":
+        return "Branco"
+    if t == "DOUBLE":
+        return "Vermelho"
+    if t == "DEFAULT":
+        return "Preto"
+    if color is not None:
+        return converter_cor(color)
+    return converter_cor(resultado)
+
+
+# ==============================================================================
+# ADICIONAR RODADA
+# ==============================================================================
+
+def adicionar_rodada(payload):
+    # Base fixa de 2.000: eventos individuais nunca são gravados.
+    print("ℹ️ RODADA INDIVIDUAL IGNORADA — base fixa de 2.000.")
+    return False
+
+
+# ==============================================================================
+# HISTÓRICO PARA A IA
+# ==============================================================================
+
+def obter_historico(limite=None):
+    dados=obter_historico_banco(limite=limite)
+    if not dados: raise RuntimeError("O histórico fixo de 2.000 rodadas ainda não foi carregado.")
+    return dados
+
+def identificar_cor_perguntada(pergunta):
+    texto=(pergunta or "").lower()
+    for cor in ("branco","vermelho","preto"):
+        if cor in texto: return cor.capitalize()
+    return None
+
+def montar_resposta_ultima_cor(rodada):
+    partes=[f"🎯 Último {rodada.get('resultado','').lower()}:",
+            f"🕐 {rodada.get('tempo') or 'horário indisponível'}"]
+    if rodada.get("numero") is not None: partes.append(f"🔢 Número: {rodada['numero']}")
+    return "\n".join(partes)
+
+
+# ==============================================================================
+# ANÁLISE DE SEQUÊNCIAS
+# ==============================================================================
+
+def emoji_cor(cor):
+    return {"Vermelho": "🔴", "Preto": "⚫", "Branco": "⚪"}.get(cor, "❓")
+
+
+def formatar_data_hora(instant, tempo=None):
+    if instant:
+        try:
+            texto = str(instant)
+            if texto.endswith("Z"):
+                texto = texto[:-1] + "+00:00"
+            dt = datetime.fromisoformat(texto)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone(timedelta(hours=-3)))
+            return dt.strftime("%d/%m/%Y"), dt.strftime("%H:%M:%S")
+        except Exception:
+            pass
+    return "data indisponível", str(tempo or "horário indisponível")
+
+
+def _ordem_temporal(d):
+    valor = d.get("instant")
+    if valor:
+        try:
+            texto = str(valor)
+            if texto.endswith("Z"):
+                texto = texto[:-1] + "+00:00"
+            dt = datetime.fromisoformat(texto)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            pass
+    return 0.0
+
+
+def normalizar_cor_analise(rodada):
+    """Retorna uma cor padronizada para uma rodada da análise."""
+    if not isinstance(rodada, dict):
+        return None
+
+    resultado = rodada.get("resultado")
+    if resultado in ("Vermelho", "Preto", "Branco"):
+        return resultado
+
+    # Se o resultado veio como número, convertemos diretamente.
+    numero = rodada.get("numero")
+    cor_numero = converter_cor(numero)
+    if cor_numero in ("Vermelho", "Preto", "Branco"):
+        return cor_numero
+
+    # Último recurso: usa o tipo do evento.
+    tipo = str(rodada.get("tipo") or "").upper()
+    if tipo == "LUCKY":
+        return "Branco"
+    if tipo == "DOUBLE":
+        return "Vermelho"
+    if tipo == "DEFAULT":
+        return "Preto"
+
+    # Também aceita resultado/color em formatos textuais conhecidos.
+    for valor in (rodada.get("color"), resultado):
+        if isinstance(valor, str):
+            texto = valor.strip().lower()
+            if texto in ("red", "vermelho"):
+                return "Vermelho"
+            if texto in ("black", "preto"):
+                return "Preto"
+            if texto in ("white", "branco"):
+                return "Branco"
+
+    return None
+
+
+def _encontrar_sequencias_de_10(dados, limite=50):
+    """
+    Reconhece blocos reais de cores consecutivas.
+
+    Regra única da estratégia:
+    - um bloco contínuo de Vermelho ou Preto com pelo menos 10 rodadas
+      gera UMA ocorrência;
+    - as 10 primeiras são o gatilho;
+    - as posições 11ª a 15ª são as cinco rodadas imediatamente seguintes;
+    - uma sequência longa (11, 15, 20...) continua sendo a mesma ocorrência;
+    - uma nova ocorrência só pode começar em um novo bloco, depois que a
+      cor mudar;
+    - só entram ocorrências que tenham as 15 posições disponíveis.
+    """
+    if not dados:
+        return []
+
+    cores = [normalizar_cor_analise(d) for d in dados]
+    ocorrencias = []
+    i = 0
+
+    while i < len(dados):
+        cor = cores[i]
+
+        # Branco ou registro sem cor: não inicia sequência.
+        if cor not in ("Vermelho", "Preto"):
+            i += 1
+            continue
+
+        # Descobre o tamanho do bloco contínuo começando em i.
+        j = i + 1
+        while j < len(dados) and cores[j] == cor:
+            j += 1
+
+        tamanho_bloco = j - i
+
+        # O bloco precisa ter pelo menos 10 da mesma cor e mais 5 rodadas
+        # depois do gatilho para que a ocorrência seja analisável.
+        if tamanho_bloco >= 10 and i + 15 <= len(dados):
+            seq_10 = dados[i:i + 10]
+            seguintes_5 = dados[i + 10:i + 15]
+
+            # As cinco posições precisam existir e ter cor reconhecida.
+            if len(seguintes_5) == 5 and all(normalizar_cor_analise(r) is not None for r in seguintes_5):
+                ocorrencias.append((i, cor, seq_10, seguintes_5))
+                if len(ocorrencias) >= limite:
+                    break
+
+        # Pula o bloco inteiro. Assim, 15/20 vermelhos nunca viram
+        # uma segunda sequência começando dentro do mesmo bloco.
+        i = j
+
+    return ocorrencias
+
+
+def analisar_sequencias_de_10_completas():
+    """Analisa TODAS as ocorrências encontradas nos 2.000 registros fixos."""
+    dados = obter_historico_banco(limite=ANALYSIS_ROUNDS)
+    if not dados:
+        return "❌ Ainda não há rodadas suficientes no histórico fixo de 2.000."
+
+    # O banco retorna mais recente -> mais antiga; a análise precisa ser cronológica.
+    dados = list(reversed(dados))
+    # Analisa todas as ocorrências completas dentro dos 2.000 registros.
+    ocorrencias = _encontrar_sequencias_de_10(dados, limite=len(dados))
+    ocorrencias = list(reversed(ocorrencias))
+
+    if not ocorrencias:
+        return "❌ Ainda não encontrei uma sequência completa de 10 vermelhos ou 10 pretos com as 5 rodadas seguintes disponíveis."
+
+    stats = {p: {"hits": 0, "total": 0} for p in range(11, 16)}
+    blocos = []
+    bateu_total = 0
+    nao_bateu_total = 0
+
+    for _, cor, seq, seguintes in ocorrencias:
+        oposta = "Preto" if cor == "Vermelho" else "Vermelho"
+        data_inicio, hora_inicio = formatar_data_hora(seq[0].get("instant"), seq[0].get("tempo"))
+        _, hora_10 = formatar_data_hora(seq[-1].get("instant"), seq[-1].get("tempo"))
+
+        linhas = [
+            f"🔥 SEQUÊNCIA DE 10 {cor.upper()} {emoji_cor(cor)}",
+            "",
+            f"📅 {data_inicio}",
+            f"🕐 Início: {hora_inicio}",
+            f"🕐 10ª rodada: {hora_10}",
+            "",
+            " ".join(emoji_cor(cor) for _ in range(10)),
+            "",
+            "➡️ APÓS A SEQUÊNCIA",
+            "",
+        ]
+
+        # No resultado final, cada sequência conta UMA única vez:
+        # bateu se a cor oposta apareceu em qualquer posição da 11ª à 15ª.
+        bateu_ocorrencia = any(normalizar_cor_analise(r) == oposta for r in seguintes)
+        if bateu_ocorrencia:
+            bateu_total += 1
+        else:
+            nao_bateu_total += 1
+
+        for offset_pos, rodada in enumerate(seguintes, start=11):
+            c = normalizar_cor_analise(rodada)
+            _, hora = formatar_data_hora(rodada.get("instant"), rodada.get("tempo"))
+            numero = rodada.get("numero")
+
+            if c == "Branco":
+                marca = f"{emoji_cor(c)} BRANCO ❌"
+            elif c == oposta:
+                stats[offset_pos]["hits"] += 1
+                marca = f"{emoji_cor(c)} {c.upper()} ✅"
+            elif c in ("Vermelho", "Preto"):
+                marca = f"{emoji_cor(c)} {c.upper()} ❌"
+            else:
+                marca = f"❓ {numero if numero is not None else '?'} ❌"
+
+            stats[offset_pos]["total"] += 1
+            linhas.append(f"{offset_pos}ª → {marca} — {hora}")
+
+        blocos.append("\n".join(linhas))
+
+    resumo = [f"📊 {len(ocorrencias)} SEQUÊNCIAS ENCONTRADAS NOS 2.000 REGISTROS", ""]
+    for p in range(11, 16):
+        total = stats[p]["total"]
+        pct = (stats[p]["hits"] / total * 100) if total else 0.0
+        resumo.append(f"{p}ª → {pct:.1f}% ({stats[p]['hits']}/{total})")
+
+    disponiveis = [p for p in range(11, 16) if stats[p]["total"]]
+    if disponiveis:
+        melhor = max(disponiveis, key=lambda p: stats[p]["hits"] / stats[p]["total"])
+        melhor_total = stats[melhor]["total"]
+        melhor_pct = stats[melhor]["hits"] / melhor_total * 100
+        resumo += ["", "🏆 MAIOR FREQUÊNCIA COR OPOSTA", f"➡️ {melhor}ª RODADA — {melhor_pct:.1f}%"]
+
+    resumo += ["", f"📈 TOTAL ANALISADO: {len(ocorrencias)} sequências"]
+
+    total_seq = len(ocorrencias)
+    taxa_acerto = (bateu_total / total_seq * 100) if total_seq else 0.0
+    taxa_nao_acerto = (nao_bateu_total / total_seq * 100) if total_seq else 0.0
+
+    resultado_final = [
+        "━━━━━━━━━━━━━━━━━━",
+        "📊 RESULTADO FINAL",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        f"🔥 SEQUÊNCIAS ENCONTRADAS: {total_seq}",
+        "",
+        f"✅ BATEU A COR OPOSTA: {bateu_total}",
+        f"❌ NÃO BATEU A COR OPOSTA: {nao_bateu_total}",
+        "",
+        f"📈 TAXA DE ACERTO: {taxa_acerto:.1f}%",
+        f"📉 TAXA DE NÃO ACERTO: {taxa_nao_acerto:.1f}%",
+    ]
+
+    detalhes_finais = "\n\n".join(blocos) + "\n\n" + "\n".join(resultado_final)
+    return ["\n".join(resumo), detalhes_finais]
+
+def analisar_sequencias_de_cores_iguais():
+    """
+    Segunda estratégia: resumo das sequências de Vermelho/Preto iguais.
+
+    Regras:
+    - Uma sequência começa quando há 2 ou mais Vermelhos ou Pretos consecutivos.
+    - Uma sequência longa conta como uma única sequência pelo seu tamanho real.
+      Ex.: 10 vermelhos = uma sequência de 10, não várias de 2, 3, 4...
+    - Branco ou uma cor diferente encerra a sequência.
+    - O resultado mostra a quantidade por tamanho/cor e a data/hora da ocorrência
+      mais recente daquele tamanho.
+    """
+    dados = obter_historico_banco(limite=ANALYSIS_ROUNDS)
+    if not dados:
+        return "❌ Ainda não há rodadas suficientes no histórico."
+
+    # O banco retorna mais recente -> mais antiga. A análise de sequência precisa
+    # ser feita da mais antiga -> mais recente.
+    dados = list(reversed(dados))
+
+    contagens = {}
+    ultima_ocorrencia = {}
+
+    i = 0
+    while i < len(dados):
+        cor = normalizar_cor_analise(dados[i])
+
+        if cor not in ("Vermelho", "Preto"):
+            i += 1
+            continue
+
+        inicio = i
+        j = i + 1
+        while j < len(dados) and normalizar_cor_analise(dados[j]) == cor:
+            j += 1
+
+        tamanho = j - inicio
+
+        if tamanho >= 2:
+            chave = (cor, tamanho)
+            contagens[chave] = contagens.get(chave, 0) + 1
+
+            # Guarda a ocorrência mais recente daquele tamanho.
+            rodada_final = dados[j - 1]
+            ultima_ocorrencia[chave] = rodada_final
+
+        i = j
+
+    if not contagens:
+        return "❌ Nenhuma sequência de 2 ou mais cores iguais foi encontrada."
+
+    # Ordena por tamanho da sequência e, dentro do mesmo tamanho, Vermelho antes Preto.
+    itens = sorted(
+        contagens.items(),
+        key=lambda item: (item[0][1], 0 if item[0][0] == "Vermelho" else 1)
+    )
+
+    linhas = ["📊 SEQUÊNCIAS DE CORES IGUAIS — 2.000 RODADAS", ""]
+
+    for (cor, tamanho), quantidade in itens:
+        rodada = ultima_ocorrencia[(cor, tamanho)]
+        data, hora = formatar_data_hora(
+            rodada.get("instant"), rodada.get("tempo")
+        )
+        palavra = "ocorrência" if quantidade == 1 else "ocorrências"
+        linhas.append(
+            f"{emoji_cor(cor)} {tamanho} iguais — {quantidade} {palavra}"
+        )
+        linhas.append(f"📅 {data}")
+        linhas.append(f"🕐 {hora}")
+        linhas.append("")
+
+    # Maior sequência real encontrada.
+    maior_tamanho = max(tamanho for (_, tamanho) in contagens)
+    maiores = [
+        (cor, tamanho)
+        for (cor, tamanho) in contagens
+        if tamanho == maior_tamanho
+    ]
+
+    # Se houver empate, mostra todas as cores da maior sequência.
+    linhas.append("🏆 MAIOR SEQUÊNCIA")
+    for cor, tamanho in maiores:
+        rodada = ultima_ocorrencia[(cor, tamanho)]
+        data, hora = formatar_data_hora(
+            rodada.get("instant"), rodada.get("tempo")
+        )
+        linhas.append(f"➡️ {tamanho} {emoji_cor(cor)}")
+        linhas.append(f"📅 {data}")
+        linhas.append(f"🕐 {hora}")
+
+    total_sequencias = sum(contagens.values())
+    linhas += [
+        "",
+        f"📚 Rodadas analisadas: {len(dados):,}",
+        f"🔢 Sequências encontradas: {total_sequencias}",
+    ]
+
+    return "\n".join(linhas)
+
+
+def analisar_atraso_do_branco():
+    """
+    Estratégia do Branco:
+    - Usa todos os 2.000 registros, em ordem cronológica.
+    - Cada Branco inicia um intervalo.
+    - O próximo Branco encerra o intervalo.
+    - Conta somente as rodadas Vermelho/Preto entre os dois Brancos,
+      sem contar o Branco inicial nem o Branco final.
+    - Calcula o horário de início, horário de término e duração real.
+    """
+    dados = obter_historico_banco(limite=ANALYSIS_ROUNDS)
+    if not dados:
+        return "❌ Ainda não há rodadas suficientes no histórico fixo de 2.000."
+
+    dados = list(reversed(dados))
+    brancos = [i for i, rodada in enumerate(dados)
+               if normalizar_cor_analise(rodada) == "Branco"]
+
+    if len(brancos) < 2:
+        return "❌ É necessário encontrar pelo menos 2 brancos nos 2.000 registros para calcular o intervalo."
+
+    intervalos = []
+    for pos in range(len(brancos) - 1):
+        inicio_idx = brancos[pos]
+        fim_idx = brancos[pos + 1]
+        inicio = dados[inicio_idx]
+        fim = dados[fim_idx]
+
+        # Quantidade de rodadas entre os dois brancos.
+        rodadas_sem_branco = max(0, fim_idx - inicio_idx - 1)
+
+        data_inicio, hora_inicio = formatar_data_hora(
+            inicio.get("instant"), inicio.get("tempo")
+        )
+        data_fim, hora_fim = formatar_data_hora(
+            fim.get("instant"), fim.get("tempo")
+        )
+
+        duracao_segundos = None
+        try:
+            a = str(inicio.get("instant") or "")
+            b = str(fim.get("instant") or "")
+            if a.endswith("Z"):
+                a = a[:-1] + "+00:00"
+            if b.endswith("Z"):
+                b = b[:-1] + "+00:00"
+            dt_a = datetime.fromisoformat(a)
+            dt_b = datetime.fromisoformat(b)
+            if dt_a.tzinfo is None:
+                dt_a = dt_a.replace(tzinfo=timezone.utc)
+            if dt_b.tzinfo is None:
+                dt_b = dt_b.replace(tzinfo=timezone.utc)
+            duracao_segundos = max(0, int((dt_b - dt_a).total_seconds()))
+        except Exception:
+            duracao_segundos = None
+
+        if duracao_segundos is not None:
+            horas, resto = divmod(duracao_segundos, 3600)
+            minutos, segundos = divmod(resto, 60)
+            if horas:
+                duracao = f"{horas}h {minutos}m {segundos}s"
+            elif minutos:
+                duracao = f"{minutos}m {segundos}s"
+            else:
+                duracao = f"{segundos}s"
+        else:
+            duracao = "indisponível"
+
+        intervalos.append({
+            "data_inicio": data_inicio,
+            "hora_inicio": hora_inicio,
+            "data_fim": data_fim,
+            "hora_fim": hora_fim,
+            "rodadas": rodadas_sem_branco,
+            "duracao": duracao,
+            "duracao_segundos": duracao_segundos if duracao_segundos is not None else -1,
+        })
+
+    # Mais recentes primeiro, para facilitar a conferência no Telegram.
+    intervalos.reverse()
+
+    maior = max(intervalos, key=lambda x: x["rodadas"])
+    menor = min(intervalos, key=lambda x: x["rodadas"])
+    media = sum(x["rodadas"] for x in intervalos) / len(intervalos)
+
+    texto = [
+        "⚪ ATRASO DO BRANCO",
+        "",
+        "📚 Análise completa dos 2.000 registros",
+        "",
+        "📖 COMO FUNCIONA A ESTRATÉGIA",
+        "",
+        "Esta estratégia procura todos os intervalos entre um Branco e o próximo Branco dentro dos 2.000 registros.",
+        "",
+        "⚪ Quando sai um Branco, começa a contagem.",
+        "🔴⚫ Cada rodada Vermelho ou Preto sem Branco aumenta o atraso em +1.",
+        "⚪ Quando sai o próximo Branco, a contagem termina.",
+        "",
+        "O bot informa automaticamente quantas rodadas ficaram sem pagar Branco, o horário em que o intervalo começou, o horário em que terminou e o tempo real que durou.",
+        "",
+        "⚠️ A análise mostra o comportamento histórico dos 2.000 registros e não garante quando o próximo Branco irá acontecer.",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "📊 RESUMO GERAL",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        f"⚪ Intervalos entre brancos: {len(intervalos)}",
+        f"📊 Média sem Branco: {media:.1f} rodadas",
+        f"📉 Menor atraso: {menor['rodadas']} rodada(s)",
+        f"🚨 Maior atraso: {maior['rodadas']} rodadas",
+        f"📅 Maior atraso: {maior['data_inicio']}",
+        f"🕐 Início: {maior['hora_inicio']}",
+        f"🕐 Fim: {maior['hora_fim']}",
+        f"⏱️ Duração: {maior['duracao']}",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "📋 INTERVALOS ENCONTRADOS",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    for n, item in enumerate(intervalos, 1):
+        texto.extend([
+            f"⚪ Intervalo {n}",
+            f"📅 {item['data_inicio']} → {item['data_fim']}",
+            f"🕐 Início: {item['hora_inicio']}",
+            f"🕐 Fim: {item['hora_fim']}",
+            f"🔢 SEM PAGAR BRANCO: {item['rodadas']} rodadas",
+            f"⏱️ Duração: {item['duracao']}",
+            "",
+        ])
+
+    return "\n".join(texto)
+
+
+def _estatisticas_surfe(caminho):
+    """Calcula os dois caminhos do SURFE em ordem cronológica."""
+    stats = {
+        "Preto": {"acertos": 0, "erros": 0, "maior_gale": 0, "gale_counts": {}},
+        "Vermelho": {"acertos": 0, "erros": 0, "maior_gale": 0, "gale_counts": {}},
+    }
+    gale = {"Preto": 0, "Vermelho": 0}
+    registros = []
+
+    for rodada in caminho:
+        saiu = normalizar_cor_analise(rodada)
+        if saiu not in ("Preto", "Vermelho", "Branco"):
+            continue
+
+        numero = len(registros) + 1
+        bloco = ((numero - 1) // 2) % 2
+        jogaria_preto = "Preto" if bloco == 0 else "Vermelho"
+        jogaria_vermelho = "Vermelho" if bloco == 0 else "Preto"
+        resultados = {}
+
+        for nome, jogaria in (("Preto", jogaria_preto), ("Vermelho", jogaria_vermelho)):
+            # Branco conta como Gale, sem interromper nem reiniciar o caminho.
+            if saiu == "Branco":
+                stats[nome]["erros"] += 1
+                gale[nome] += 1
+                stats[nome]["maior_gale"] = max(
+                    stats[nome]["maior_gale"], gale[nome]
+                )
+                stats[nome]["gale_counts"][gale[nome]] = (
+                    stats[nome]["gale_counts"].get(gale[nome], 0) + 1
+                )
+                resultados[nome] = f"❌ GALE {gale[nome]}"
+                continue
+
+            if saiu == jogaria:
+                stats[nome]["acertos"] += 1
+                gale[nome] = 0
+                resultados[nome] = "✅ ACERTO"
+            else:
+                stats[nome]["erros"] += 1
+                gale[nome] += 1
+                stats[nome]["maior_gale"] = max(
+                    stats[nome]["maior_gale"], gale[nome]
+                )
+                stats[nome]["gale_counts"][gale[nome]] = (
+                    stats[nome]["gale_counts"].get(gale[nome], 0) + 1
+                )
+                resultados[nome] = f"❌ GALE {gale[nome]}"
+
+        data, hora = formatar_data_hora(
+            rodada.get("instant"), rodada.get("tempo")
+        )
+        registros.append({
+            "numero": numero,
+            "numero_real": rodada.get("numero", "?"),
+            "data": data,
+            "hora": hora,
+            "saiu": saiu,
+            "jogaria_preto": jogaria_preto,
+            "jogaria_vermelho": jogaria_vermelho,
+            "resultado_preto": resultados["Preto"],
+            "resultado_vermelho": resultados["Vermelho"],
+        })
+
+    return registros, stats
+
+
+def _resumo_surfe_estrategia(stats, nome, titulo):
+    """Resumo principal do SURF, sem exibir os Gales."""
+    st = stats[nome]
+    total = st["acertos"] + st["erros"]
+    pct = (st["acertos"] / total * 100) if total else 0.0
+
+    return "\n".join([
+        titulo,
+        f"✅ ACERTOS: {st['acertos']}",
+        f"❌ ERROS: {st['erros']}",
+        f"📈 APROVEITAMENTO: {pct:.1f}%",
+    ])
+
+
+def _emoji_numero_gale(numero):
+    # Padroniza o desenho em todo o bot.
+    # O 10 usa o emoji próprio 🔟, evitando diferenças visuais entre telas.
+    if str(numero) == "10":
+        return "🔟"
+
+    mapa = {
+        "0": "0️⃣", "1": "1️⃣", "2": "2️⃣", "3": "3️⃣", "4": "4️⃣",
+        "5": "5️⃣", "6": "6️⃣", "7": "7️⃣", "8": "8️⃣", "9": "9️⃣",
+    }
+    return "".join(mapa.get(c, c) for c in str(numero))
+
+
+def _numero_gale_visual(numero):
+    """Usa o mesmo padrão de emoji numérico já existente no bot."""
+    return _emoji_numero_gale(numero)
+
+
+def _resumo_gales_surfe(stats, nome, titulo):
+    st = stats[nome]
+    maior = _numero_gale_visual(st["maior_gale"])
+    partes = [titulo, f"🔥 MAIOR GALE: GALE {maior}"]
+    for n in sorted(st["gale_counts"]):
+        partes.append(f"📊 GALE {_numero_gale_visual(n)}: {st['gale_counts'][n]}")
+    return "\n".join(partes)
+
+
+def obter_brancos_surfe():
+    """Retorna todos os Brancos dos 2.000 registros em ordem antiga -> recente."""
+    dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+    return [
+        (i, rodada)
+        for i, rodada in enumerate(dados)
+        if normalizar_cor_analise(rodada) == "Branco"
+    ]
+
+
+def montar_botoes_brancos_surfe(brancos, inicio=0, fim=None):
+    """Monta os Brancos em duas colunas, mantendo a ordem cronológica."""
+    fim = len(brancos) if fim is None else min(fim, len(brancos))
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    itens = brancos[inicio:fim]
+
+    for pos in range(0, len(itens), 2):
+        botoes = []
+        for offset in (0, 1):
+            if pos + offset >= len(itens):
+                break
+            indice, rodada = itens[pos + offset]
+            _, hora = formatar_data_hora(
+                rodada.get("instant"), rodada.get("tempo")
+            )
+            # O índice é o índice cronológico dentro dos 2.000 registros.
+            botoes.append(
+                telebot.types.InlineKeyboardButton(
+                    f"⚪ {hora}",
+                    callback_data=f"surfe_branco:{indice}",
+                )
+            )
+        markup.row(*botoes)
+
+    return markup
+
+
+def obter_ocorrencias_numero_surfe(numero):
+    """Retorna todas as ocorrências de um número em ordem antiga -> recente."""
+    numero = int(numero)
+    dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+    return [
+        (i, rodada)
+        for i, rodada in enumerate(dados)
+        if rodada.get("numero") is not None and int(rodada.get("numero")) == numero
+    ]
+
+
+def montar_botoes_numero_surfe(ocorrencias, numero, inicio=0, fim=None):
+    """Monta as ocorrências do número em duas colunas, igual ao painel dos Brancos."""
+    numero = int(numero)
+    fim = len(ocorrencias) if fim is None else min(fim, len(ocorrencias))
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    itens = ocorrencias[inicio:fim]
+    cor = converter_cor(numero)
+    emoji = emoji_cor(cor)
+
+    for pos in range(0, len(itens), 2):
+        botoes = []
+        for offset in (0, 1):
+            if pos + offset >= len(itens):
+                break
+            indice, rodada = itens[pos + offset]
+            _, hora = formatar_data_hora(rodada.get("instant"), rodada.get("tempo"))
+            botoes.append(
+                telebot.types.InlineKeyboardButton(
+                    f"{emoji} {hora}",
+                    callback_data=f"surfe_ponto:{indice}:{numero}",
+                )
+            )
+        markup.row(*botoes)
+    return markup
+
+
+def _identificacao_ponto_surfe(analise):
+    """Texto do ponto inicial, funcionando para Branco ou para números 1 a 14."""
+    tipo = analise.get("tipo_ponto", "Branco")
+    emoji = analise.get("emoji_ponto", "⚪")
+    if tipo == "Numero":
+        numero = analise.get("numero_ponto")
+        return f"{emoji} Número {numero}"
+    return "⚪ Branco"
+
+
+def _identificacao_estado_surfe(estado, dados=None):
+    """Retorna rótulo e horário do ponto atualmente selecionado."""
+    indice = estado.get("ponto_index", estado.get("branco_index"))
+    if dados is None:
+        dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+    if indice is None or indice < 0 or indice >= len(dados):
+        return "Ponto selecionado", "horário indisponível", "❓"
+    rodada = dados[indice]
+    _, hora = formatar_data_hora(rodada.get("instant"), rodada.get("tempo"))
+    numero = rodada.get("numero")
+    cor = normalizar_cor_analise(rodada)
+    emoji = emoji_cor(cor)
+    if cor == "Branco":
+        return "Branco selecionado", hora, emoji
+    return f"Número {numero} selecionado", hora, emoji
+
+
+def _montar_linhas_estrategia_surfe(registros, estrategia, numero_final_analise=None):
+    """Monta as linhas de uma estratégia com espaçamento de controle."""
+    linhas = []
+
+    for item in registros:
+        jogaria = (
+            item["jogaria_preto"]
+            if estrategia == "Preto"
+            else item["jogaria_vermelho"]
+        )
+        resultado = (
+            item["resultado_preto"]
+            if estrategia == "Preto"
+            else item["resultado_vermelho"]
+        )
+
+        numero = int(item["numero"])
+        numero_real = str(item.get("numero_real", "?"))
+        cor_real = emoji_cor(item["saiu"])
+        if cor_real in ("🔴", "⚫"):
+            cor_real += "\uFE0F"
+
+        cor_jogada = emoji_cor(jogaria)
+        if cor_jogada in ("🔴", "⚫"):
+            cor_jogada += "\uFE0F"
+
+        if resultado.startswith("❌ GALE"):
+            gale = int(resultado.split()[-1])
+            # Mantém G1 a G9. A partir do G10 usa uma única letra:
+            # G10=GA, G11=GB, G12=GC ... G35=GZ.
+            # Isso evita aumentar a largura da linha quando o Gale passa de 9.
+            if 10 <= gale <= 35:
+                identificador_gale = chr(ord("A") + (gale - 10))
+            else:
+                identificador_gale = str(gale)
+            marcador = f"❌G{identificador_gale}"
+        else:
+            marcador = "✅"
+
+        # Espaço padronizado entre o número da rodada e a primeira bolinha.
+        # É IGUAL em todas as rodadas (01 a 50).
+        espaco_rodada = "\u2007"
+
+        # SOMENTE 01 a 08 recebem o ajuste fino ANTES do número da rodada.
+        # Assim a linha inteira desloca levemente para a direita, sem aumentar
+        # o espaço entre "01/02/..." e a primeira bolinha.
+        ajuste_01_08 = ""
+        ajuste_apos_numero_direita = ""
+        ajuste_antes_seta_direita = ""
+
+        if 1 <= numero <= 8:
+            valor_config = (
+                AJUSTE_01_08_ANTES_SETA_ESQUERDA
+                if estrategia == "Vermelho"
+                else AJUSTE_01_08_ANTES_SETA_DIREITA
+            )
+        elif 1000 <= numero <= 1007:
+            valor_config = (
+                AJUSTE_CENTENA_00_07_ANTES_SETA_ESQUERDA
+                if estrategia == "Vermelho"
+                else 0.0
+            )
+            if estrategia == "Preto":
+                ajuste_antes_seta_direita = "\u200A" * 2
+
+        elif 1100 <= numero <= 1907 and (numero % 100) <= 7:
+            valor_config = 0.2 if estrategia == "Vermelho" else 0.0
+            if estrategia == "Preto":
+                ajuste_apos_numero_direita = ""
+                ajuste_antes_seta_direita = "\u200A" * 2
+
+        elif 100 <= numero <= 907 and (numero % 100) <= 7:
+            if estrategia == "Vermelho":
+                valor_config = AJUSTE_CENTENA_00_07_ANTES_SETA_ESQUERDA
+            else:
+                valor_config = 0.0
+                ajuste_apos_numero_direita = ""
+                ajuste_antes_seta_direita = "\u200A" * 2
+
+        elif numero >= 100 and (numero % 100) <= 7:
+            if estrategia == "Vermelho":
+                valor_config = AJUSTE_CENTENA_00_07_ANTES_SETA_ESQUERDA
+            else:
+                valor_config = 0.0
+                valor = max(0.0, float(AJUSTE_CENTENA_00_07_APOS_NUMERO_DIREITA))
+                parte_inteira = int(valor)
+                decimos = int(round((valor - parte_inteira) * 10))
+                ajuste_apos_numero_direita = ("\u3164" * parte_inteira) + ("\u200A" * decimos)
+
+        else:
+            valor_config = 0.0
+
+        # Calibração EXCLUSIVA da última rodada da quantidade escolhida.
+        # Valor positivo = seta vai para a direita.
+        # Valor negativo = seta vai para a esquerda.
+        if numero == numero_final_analise and numero in AJUSTE_FINAL_SURF:
+            chave = "esquerda" if estrategia == "Vermelho" else "direita"
+            valor_config += AJUSTE_FINAL_SURF[numero][chave]
+
+        valor_ajuste = max(0.0, float(valor_config))
+        parte_inteira = int(valor_ajuste)
+        decimos = int(round((valor_ajuste - parte_inteira) * 10))
+        ajuste_01_08 = ("\u3164" * parte_inteira) + ("\u200A" * decimos)
+
+        espaco_cor = "\u2007" if len(numero_real) == 1 else ""
+
+        numero_formatado = f"{numero:02d}"
+
+        linha = (
+            f"{numero_formatado}{ajuste_apos_numero_direita}{espaco_rodada}"
+            f"{cor_real}{numero_real}{espaco_cor}"
+            f"{ajuste_01_08}{ajuste_antes_seta_direita}-{cor_jogada}{marcador}"
+        )
+        linhas.append(linha)
+
+    return linhas
+
+
+def _largura_visual_surfe(texto):
+    """Calcula uma largura aproximada de célula para alinhamento monoespaçado."""
+    largura = 0
+    for caractere in texto:
+        if unicodedata.combining(caractere):
+            continue
+        if unicodedata.east_asian_width(caractere) in ("W", "F"):
+            largura += 2
+        else:
+            largura += 1
+    return largura
+
+
+def _preencher_visual_surfe(texto, largura_alvo):
+    """Completa uma linha até a largura visual alvo sem alterar seu conteúdo."""
+    faltam = max(0, largura_alvo - _largura_visual_surfe(texto))
+    return texto + (" " * faltam)
+
+
+# =========================================================
+# AJUSTE MANUAL DO ALINHAMENTO ENTRE AS COLUNAS DO SURF
+# ALTERE SOMENTE ESTES DOIS NÚMEROS PARA TESTAR:
+# =========================================================
+ESPACO_APOS_G = 2.0
+ESPACO_APOS_CHECK = 3.4
+
+# Ajuste fino SOMENTE das rodadas 01 a 08.
+# 0.1 = um ajuste mínimo para a direita.
+# Você pode testar 0.2, 0.3, 0.4... sem mexer nas rodadas 09 a 50.
+# Ajustes independentes SOMENTE para as rodadas 01 a 08.
+# Quanto maior, mais a respectiva coluna vai para a direita.
+AJUSTE_01_08_ANTES_SETA_ESQUERDA = 0.2
+AJUSTE_01_08_ANTES_SETA_DIREITA = 0.2
+
+# Ajustes finos das faixas 00–07 de TODA centena/milhar:
+# 100–107, 200–207 ... 900–907, 1000–1007, 1100–1107, 1200–1207...
+#
+# COLUNA ESQUERDA (SURF vermelho): espaço ANTES da seta/hífen.
+AJUSTE_CENTENA_00_07_ANTES_SETA_ESQUERDA = 0.2
+#
+# COLUNA DIREITA (SURF preto): espaço LOGO APÓS o número da rodada.
+# Ex.: 1200[espaço] ⚫8-...
+AJUSTE_CENTENA_00_07_APOS_NUMERO_DIREITA = 0.2
+
+# Ajuste EXCLUSIVO para linhas de 4 dígitos (1000+).
+# A coluna esquerda fica exatamente como já estava.
+# Este valor reduz SOMENTE o separador antes da coluna direita,
+# trazendo SURF ⚫ para a esquerda para compensar o 4º dígito.
+# -0.1 = aproxima minimamente | -0.8 = aproxima 8 Hair Spaces.
+AJUSTE_4_DIGITOS_SEPARADOR = -0.8
+
+# Calibrador EXTRA somente de 1008 em diante.
+# A coluna esquerda não muda; apenas aproxima a coluna direita.
+# 0.2 = 2 Hair Spaces adicionais para a esquerda.
+AJUSTE_DIREITA_1008_MAIS = 0.2
+
+# =========================================================
+# CALIBRAÇÃO SOMENTE DA ÚLTIMA RODADA DE CADA BOTÃO DO SURF
+# =========================================================
+# esquerda/direita: mexem SOMENTE antes da seta (-) da respectiva camada.
+#   +0.1 = um pouco para a direita | -0.1 = um pouco para a esquerda
+# separador: mexe SOMENTE no espaço entre as duas colunas.
+#   +0.1 = afasta as colunas | -0.1 = aproxima as colunas
+#
+# Estes valores NÃO alteram 100/200/300... quando aparecem no meio da análise.
+# Só alteram o número que for exatamente a ÚLTIMA rodada selecionada.
+AJUSTE_FINAL_SURF = {
+    100:  {"esquerda": 0.0, "direita": 0.0, "separador": 0.0},
+    200:  {"esquerda": -0.2, "direita": -0.2, "separador": 0.0},
+    300:  {"esquerda": -0.2, "direita": -0.2, "separador": 0.0},
+    400:  {"esquerda": -0.2, "direita": -0.4, "separador": 0.0},
+    500:  {"esquerda": -0.2, "direita": -0.4, "separador": 0.0},
+    600:  {"esquerda": -0.2, "direita": -0.4, "separador": 0.0},
+    700:  {"esquerda": -0.2, "direita": -0.4, "separador": 0.0},
+    800:  {"esquerda": -0.2, "direita": -0.2, "separador": 0.0},
+    900:  {"esquerda": -0.2, "direita": -0.2, "separador": 0.0},
+    1000: {"esquerda": -0.2, "direita": -0.2, "separador": 0.0},
+}
+
+def _montar_surfe_duas_colunas(registros, numero_final_analise=None):
+    """Monta as duas colunas do SURF com espaçamento padronizado."""
+    vermelho = _montar_linhas_estrategia_surfe(registros, "Vermelho", numero_final_analise)
+    preto = _montar_linhas_estrategia_surfe(registros, "Preto", numero_final_analise)
+
+    linhas = [
+        "SURF🔴" + ("\u2007" * 5) + "SURF⚫",
+        "",
+    ]
+
+    for esquerda, direita in zip(vermelho, preto):
+        # Compensação manual com ajuste decimal.
+        # Parte inteira -> ㅤ (U+3164)
+        # Cada 0.1      -> Hair Space (U+200A)
+        def criar_espaco(valor):
+            valor = max(0.0, float(valor))
+            parte_inteira = int(valor)
+            decimos = int(round((valor - parte_inteira) * 10))
+
+            return ("\u3164" * parte_inteira) + ("\u200A" * decimos)
+
+        # Como ❌G ocupa mais largura que ✅, cada final tem seu próprio ajuste.
+        if esquerda.endswith("✅"):
+            valor_separador = ESPACO_APOS_CHECK
+        elif "❌G" in esquerda:
+            valor_separador = ESPACO_APOS_G
+        else:
+            valor_separador = ESPACO_APOS_G
+
+        # GA–GZ na coluna esquerda: a letra fica visualmente um pouco mais larga
+        # no Telegram. Reduz 0.1 SOMENTE do espaço depois do Gale para manter
+        # a coluna direita alinhada. G1–G9 permanecem exatamente como estão.
+        if re.search(r"❌G[A-Z]$", esquerda):
+            valor_separador -= 0.1
+
+        # Linhas de 4 dígitos: mantém a coluna esquerda intacta e
+        # aproxima SOMENTE a coluna direita, compensando o dígito extra.
+        numero_linha = int(esquerda.split()[0])
+        if numero_linha >= 1000:
+            valor_separador += AJUSTE_4_DIGITOS_SEPARADOR
+
+        # Ajuste EXCLUSIVO 1000–1007: move somente a coluna direita
+        # mais 0.2 para a esquerda, sem alterar a coluna esquerda.
+        if 1000 <= numero_linha <= 1007:
+            valor_separador -= 0.2
+
+        # A partir de 1008, aproxima um pouco mais SOMENTE a coluna direita.
+        if numero_linha >= 1008:
+            valor_separador -= AJUSTE_DIREITA_1008_MAIS
+
+        # Ajuste independente do espaço entre as colunas SOMENTE na última rodada.
+        # Valor negativo aproxima a coluna direita; positivo afasta.
+        if numero_linha == numero_final_analise and numero_linha in AJUSTE_FINAL_SURF:
+            valor_separador += AJUSTE_FINAL_SURF[numero_linha]["separador"]
+
+        separador = criar_espaco(valor_separador)
+        linhas.append(esquerda + separador + direita)
+
+    return "\n".join(linhas)
+
+
+
+def _montar_blocos_surfe(registros):
+    """Divide a exibição do SURF sem cortar uma rodada no meio."""
+    if not registros:
+        return []
+
+    blocos_registros = []
+    bloco_atual = []
+
+    for item in registros:
+        numero = int(item["numero"])
+
+        # Mantém os cortes já aprovados:
+        # 01–99, 100–199, 200–299, 300–399...
+        if bloco_atual and numero >= 100 and numero % 100 == 0:
+            blocos_registros.append(bloco_atual)
+            bloco_atual = []
+
+        bloco_atual.append(item)
+
+    if bloco_atual:
+        blocos_registros.append(bloco_atual)
+
+    # Exceção SOMENTE para o final da análise:
+    # se o último bloco tiver apenas 1 rodada (ex.: 400 sozinho),
+    # junta essa última rodada ao bloco anterior.
+    if len(blocos_registros) >= 2 and len(blocos_registros[-1]) == 1:
+        blocos_registros[-2].extend(blocos_registros[-1])
+        blocos_registros.pop()
+
+    numero_final_analise = int(registros[-1]["numero"])
+
+    return [
+        _montar_surfe_duas_colunas(bloco, numero_final_analise)
+        for bloco in blocos_registros
+    ]
+
+def analisar_surfe_inicial():
+    """Prepara o painel do SURF para escolha do Branco inicial."""
+    brancos = obter_brancos_surfe()
+    if not brancos:
+        return None
+
+    introducao = "\n".join([
+        "⚪ SURF — ESCOLHA O BRANCO",
+        "",
+        "👇 Escolha abaixo o Branco onde você quer iniciar o Surf.",
+        "",
+        "📊 Ao clicar em um Branco, o bot vai analisar todas as rodadas",
+        "a partir dele até o resultado mais recente, mostrando como o Surf",
+        "teria se comportado começando exatamente naquele ponto.",
+        "",
+        "🕐 Os Brancos estão organizados do mais antigo para o mais recente,",
+        "para que a análise respeite a ordem real das rodadas.",
+        "",
+        "💡 Você pode escolher qualquer Branco para testar diferentes pontos de entrada.",
+        "",
+        "⚪ Selecione um Branco abaixo:",
+    ])
+    return {"intro": introducao, "brancos": brancos}
+
+def analisar_surfe_a_partir_do_branco(indice_branco, limite=None):
+    """Analisa o SURF a partir de qualquer ponto selecionado (Branco ou número).
+
+    O nome da função é mantido por compatibilidade com o restante do bot.
+    """
+    dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+    if indice_branco < 0 or indice_branco >= len(dados):
+        return None
+
+    ponto = dados[indice_branco]
+    data_ponto, hora_ponto = formatar_data_hora(
+        ponto.get("instant"), ponto.get("tempo")
+    )
+    cor_ponto = normalizar_cor_analise(ponto)
+    numero_ponto = ponto.get("numero")
+    tipo_ponto = "Branco" if cor_ponto == "Branco" else "Numero"
+    emoji_ponto = emoji_cor(cor_ponto)
+
+    # O registro escolhido é o gatilho. O SURF começa na rodada imediatamente
+    # posterior e segue cronologicamente até as rodadas mais recentes.
+    caminho = dados[indice_branco + 1:]
+    if limite is not None:
+        caminho = caminho[:limite]
+
+    registros, stats = _estatisticas_surfe(caminho)
+
+    return {
+        "branco": ponto,  # compatibilidade com funções antigas
+        "data_branco": data_ponto,
+        "hora_branco": hora_ponto,
+        "ponto": ponto,
+        "data_ponto": data_ponto,
+        "hora_ponto": hora_ponto,
+        "cor_ponto": cor_ponto,
+        "numero_ponto": numero_ponto,
+        "tipo_ponto": tipo_ponto,
+        "emoji_ponto": emoji_ponto,
+        "registros": registros,
+        "stats": stats,
+    }
+
+def montar_resultado_surfe(analise):
+    """Monta o cabeçalho, as rodadas escolhidas e o resumo do SURF."""
+    registros = analise["registros"]
+    identificacao = _identificacao_ponto_surfe(analise)
+    cabecalho = "\n".join([
+        f"🏄 SURF-{len(registros)} RODADAS",
+        "",
+        f"{identificacao} inicial: {analise['data_ponto']} às {analise['hora_ponto']}",
+        f"📚 Analisadas: {len(registros)}",
+    ])
+
+    rodadas = _montar_surfe_duas_colunas(registros)
+
+    estatistica = "\n".join([
+        "📊 RESULTADO — APÓS O PONTO SELECIONADO",
+        f"{identificacao}: {analise['data_ponto']} às {analise['hora_ponto']}",
+        f"📚 Das {len(registros)} rodadas seguintes",
+        "",
+        _resumo_surfe_estrategia(analise["stats"], "Preto", "⚫ SURFE — 2 PRETOS"),
+        "",
+        _resumo_surfe_estrategia(analise["stats"], "Vermelho", "🔴 SURFE — 2 VERMELHOS"),
+    ])
+
+    return cabecalho + "\n\n§§§SURF_RODADAS§§§\n\n" + rodadas + "\n\n§§§SURF_ESTATISTICA§§§\n\n" + estatistica
+
+def montar_controle_geral_surfe(analise):
+    """Resumo geral desde o ponto escolhido até a rodada mais recente."""
+    stats = analise["stats"]
+    total = len(analise["registros"])
+
+    return "\n".join([
+        "📊 RESULTADO GERAL — DO PONTO SELECIONADO",
+        "",
+        "📖 COMO ENTENDER O RESULTADO",
+        "",
+        "Esta análise mostra como os dois SURF teriam se comportado",
+        "a partir do ponto escolhido, até o resultado mais recente.",
+        "",
+        "⚫ 2 PRETOS → 2 Pretos, depois 2 Vermelhos, repetindo.",
+        "🔴 2 VERMELHOS → 2 Vermelhos, depois 2 Pretos, repetindo.",
+        "",
+        "✅ Acerto = a cor que saiu foi a indicada pelo SURF.",
+        "❌ Erro = a cor foi diferente e o Gale aumentou.",
+        "📈 Aproveitamento = porcentagem de acertos.",
+        "🔥 Maior Gale = maior sequência de Gales registrada.",
+        "📊 Gale 1, 2, 3... = quantidade de vezes que cada Gale ocorreu.",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        f"{_identificacao_ponto_surfe(analise)}: {analise['data_ponto']} às {analise['hora_ponto']}",
+        f"📚 Total de rodadas analisadas: {total}",
+        "",
+        _resumo_surfe_estrategia(stats, "Preto", "⚫ SURFE — 2 PRETOS"),
+        "",
+        _resumo_surfe_estrategia(stats, "Vermelho", "🔴 SURFE — 2 VERMELHOS"),
+        "",
+        "⚠️ Estatística histórica. Não garante o resultado da próxima rodada.",
+    ])
+
+
+
+def painel_markup():
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        telebot.types.InlineKeyboardButton("🔥 SEQUÊNCIA CORES IGUAIS 10X — COMPLETA", callback_data="seq10")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("📊 SEQUÊNCIA DE CORES IGUAIS", callback_data="seqcores")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("⚪ ATRASO DO BRANCO", callback_data="branco_atraso")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("⚪⚫🔴 SURF", callback_data="surfe")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("🐺 CONTROLE GERAL — SURF", callback_data="controle_geral_surfe")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("📊 Últimas 50", callback_data="ult50"),
+        telebot.types.InlineKeyboardButton("📚 Total", callback_data="total"),
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("🕐 Última rodada", callback_data="ultima")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("🔎 INVESTIGAÇÃO", callback_data="investigacao"),
+        telebot.types.InlineKeyboardButton("🤖 BOT", callback_data="menu_bot"),
+    )
+    return markup
+
+
+def bot_controle_markup():
+    """Funções técnicas do monitor ficam concentradas no menu 🤖 BOT."""
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    with alertas_surfe_lock:
+        alertas_ativos = alertas_surfe_ativos
+
+    # Painel novo de configuração de estratégia.
+    # É apenas interface neste primeiro passo: não altera o monitor atual.
+    markup.add(
+        telebot.types.InlineKeyboardButton(
+            "🧠 CONFIGURAR BOT E ATIVAR",
+            callback_data="configurar_estrategia"
+        )
+    )
+
+    markup.add(
+        telebot.types.InlineKeyboardButton("📡 CAMINHO AO VIVO", callback_data="caminho_ao_vivo")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("📡 REGISTROS ONLINE", callback_data="registro_alertas_surfe")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("💾 REGISTROS DE SINAIS", callback_data="registro_sinais_surfe")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("🧪 TESTAR CANAL DE ALERTAS", callback_data="testar_canal_alertas")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("📡 TESTAR RODADA AO VIVO", callback_data="testar_rodada_ao_vivo")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="voltar_painel_principal")
+    )
+    return markup
+
+
+def _texto_controle_bot():
+    return (
+        "🤖 CONTROLE DO BOT\n\n"
+        "Aqui você controla e acompanha o monitor do SURF em tempo real.\n\n"
+        "Você pode ativar ou desativar os alertas e consultar os registros do monitor.\n\n"
+        "⚙️ Escolha uma função abaixo."
+    )
+
+
+def _gale_txt(valor):
+    return f"G{valor}" if valor is not None else "NÃO CONFIGURADO"
+
+def _limite_txt(valor):
+    return f"G{valor}" if valor is not None else "NÃO CONFIGURADO"
+
+def _aviso_txt(valor):
+    if valor is None:
+        return "NÃO CONFIGURADO"
+    if valor == 0:
+        return "NÃO AVISAR"
+    return f"{valor} Gale(s) antes"
+
+def _config_completa(cfg):
+    return all(cfg.get(k) is not None for k in ("gale_gatilho", "surf", "limite_gales", "aviso_antes"))
+
+
+
+RELATORIO_AUTOMATICO_MODELO = """📊 RELATÓRIO AUTOMÁTICO — {qtd} SINAIS
+━━━━━━━━━━━━━━━━━━
+
+🎯 SINAIS ANALISADOS: {qtd}
+
+✅ GREENS: {greens}
+❌ LOSS: {loss}
+📈 TAXA DE GREEN: {taxa_green}%
+📉 TAXA DE LOSS: {taxa_loss}%
+
+━━━━━━━━━━━━━━━━━━
+🎯 ONDE BATERAM OS GREENS
+
+{distribuicao}
+
+━━━━━━━━━━━━━━━━━━
+🔥 SEQUÊNCIAS
+
+🟢 MAIOR SEQUÊNCIA DE GREENS: {seq_green}
+🔴 MAIOR SEQUÊNCIA DE LOSS: {seq_loss}
+📍 MAIOR GALE UTILIZADO: {maior_gale}
+
+━━━━━━━━━━━━━━━━━━
+⚖️ BALANÇO DA PROGRESSÃO
+
+🟢 GREENS: +{unidades_green} unidades
+🔴 LOSS: -{unidades_loss} unidades
+
+💰 SALDO: {saldo} unidades
+{emoji_resultado} RESULTADO: {resultado}
+
+━━━━━━━━━━━━━━━━━━
+{comparacao}
+
+━━━━━━━━━━━━━━━━━━
+📡 NOVO BLOCO INICIADO
+Próxima análise após mais {qtd} sinais."""
+
+
+def _relatorio_cfg(chat_id, modo):
+    return _cfg_gatilho(chat_id) if modo == "gatilho" else _cfg(chat_id)
+
+
+def _relatorio_status(cfg):
+    qtd = int(cfg.get("relatorio_qtd") or 0)
+    return "DESATIVADO" if qtd <= 0 else f"{qtd} SINAIS"
+
+
+def _relatorio_markup(modo, chat_id):
+    prefix = "gatrel" if modo == "gatilho" else "rel"
+    voltar = "gatcfg_menu" if modo == "gatilho" else "config_modo_surf_normal"
+    m = telebot.types.InlineKeyboardMarkup(row_width=2)
+    m.row(
+        telebot.types.InlineKeyboardButton("25 SINAIS", callback_data=f"{prefix}_set:25"),
+        telebot.types.InlineKeyboardButton("50 SINAIS", callback_data=f"{prefix}_set:50"),
+    )
+    m.add(telebot.types.InlineKeyboardButton("100 SINAIS", callback_data=f"{prefix}_set:100"))
+    m.add(telebot.types.InlineKeyboardButton("🔢 OUTRO VALOR", callback_data=f"{prefix}_outro"))
+    m.add(telebot.types.InlineKeyboardButton("👁 VER TEXTO ATUAL", callback_data=f"{prefix}_ver"))
+    m.add(telebot.types.InlineKeyboardButton("✏️ ALTERAR TEXTO", callback_data=f"{prefix}_editar"))
+    m.add(telebot.types.InlineKeyboardButton("♻️ RESTAURAR PADRÃO", callback_data=f"{prefix}_restaurar"))
+    m.add(telebot.types.InlineKeyboardButton("🚫 DESATIVADO", callback_data=f"{prefix}_set:0"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data=voltar))
+    return m
+
+
+def _relatorio_exemplo(cfg):
+    modelo = cfg.get("relatorio_texto") or RELATORIO_AUTOMATICO_MODELO
+    dados = dict(
+        qtd=50, greens=47, loss=3, taxa_green="94,0", taxa_loss="6,0",
+        distribuicao="✅ DIRETO: 20\n1️⃣ GALE 1: 14\n2️⃣ GALE 2: 8\n3️⃣ GALE 3: 5",
+        seq_green=18, seq_loss=1, maior_gale="G3", unidades_green=47,
+        unidades_loss=45, saldo="+2", emoji_resultado="🟢", resultado="POSITIVO",
+        comparacao="📚 ÚLTIMO BLOCO — 1 A 50\n\n📈 TAXA DE GREEN: 94,0%\n💰 SALDO: +2 unidades\n🟢 RESULTADO: POSITIVO\n\n━━━━━━━━━━━━━━━━━━\n📊 BLOCOS GERAIS\n\n📦 BLOCOS ANALISADOS: 4\n📈 TAXA GERAL DE GREEN: 93,5%\n💰 SALDO GERAL: +22 unidades\n🟢 RESULTADO GERAL: POSITIVO",
+    )
+    try:
+        return modelo.format(**dados)
+    except Exception:
+        return RELATORIO_AUTOMATICO_MODELO.format(**dados)
+
+
+def _texto_relatorio_menu(chat_id, modo):
+    cfg = _relatorio_cfg(chat_id, modo)
+    nome = "🎯 ENTRADA POR GATILHO" if modo == "gatilho" else "🏄 SURF"
+    return (
+        f"📊 RELATÓRIO AUTOMÁTICO — {nome}\n\n"
+        "Gera automaticamente um relatório após a quantidade de sinais que você escolher.\n\n"
+        "📊 O relatório mostra os resultados da estratégia, porcentagem de GREEN e LOSS, "
+        "distribuição dos acertos por Gale, sequências, balanço da progressão, sinais anteriores e blocos gerais.\n\n"
+        f"⚙️ CONFIGURAÇÃO ATUAL: {_relatorio_status(cfg)}\n\n"
+        "👇 Escolha após quantos sinais deseja gerar o relatório:"
+    )
+
+
+def _relatorio_texto_markup(modo):
+    prefix = "gatrel" if modo == "gatilho" else "rel"
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton("🙈 OCULTAR TEXTO", callback_data=f"{prefix}_menu"))
+    m.add(telebot.types.InlineKeyboardButton("✏️ ALTERAR TEXTO", callback_data=f"{prefix}_editar"))
+    m.add(telebot.types.InlineKeyboardButton("♻️ RESTAURAR PADRÃO", callback_data=f"{prefix}_restaurar"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data=f"{prefix}_menu"))
+    return m
+
+def _relatorio_receber_qtd(message, modo):
+    try:
+        qtd = int((message.text or "").strip())
+        if qtd <= 0 or qtd > 10000:
+            raise ValueError
+    except Exception:
+        bot.send_message(message.chat.id, "❌ Digite um número inteiro entre 1 e 10000.")
+        return
+    cfg = _relatorio_cfg(message.chat.id, modo)
+    cfg["relatorio_qtd"] = qtd
+    cfg["relatorio_bloco"] = []
+    cfg["relatorio_anterior"] = None
+    cfg["relatorio_geral_blocos"] = 0
+    cfg["relatorio_geral_sinais"] = 0
+    cfg["relatorio_geral_greens"] = 0
+    cfg["relatorio_geral_saldo"] = 0
+    bot.send_message(message.chat.id, f"✅ RELATÓRIO AUTOMÁTICO CONFIGURADO PARA {qtd} SINAIS.")
+
+
+def _relatorio_receber_texto(message, modo):
+    texto = (message.text or "").strip()
+    if not texto:
+        bot.send_message(message.chat.id, "❌ Texto vazio. Nenhuma alteração foi feita.")
+        return
+    # Valida placeholders sem impedir que o usuário remova alguns deles.
+    cfg = _relatorio_cfg(message.chat.id, modo)
+    antigo = cfg.get("relatorio_texto")
+    cfg["relatorio_texto"] = texto
+    try:
+        _relatorio_exemplo(cfg)
+    except Exception:
+        cfg["relatorio_texto"] = antigo
+        bot.send_message(message.chat.id, "❌ O texto contém um campo inválido entre chaves { }. Nenhuma alteração foi feita.")
+        return
+    bot.send_message(message.chat.id, "✅ TEXTO DO RELATÓRIO ATUALIZADO.")
+
+
+def _relatorio_maior_sequencia(bloco, alvo):
+    melhor = atual = 0
+    for item in bloco:
+        if item["resultado"] == alvo:
+            atual += 1
+            melhor = max(melhor, atual)
+        else:
+            atual = 0
+    return melhor
+
+
+def _relatorio_gerar(cfg, bloco):
+    qtd = len(bloco)
+    greens = sum(1 for x in bloco if x["resultado"] == "green")
+    loss = qtd - greens
+    pctg = greens / qtd * 100 if qtd else 0
+    pctl = loss / qtd * 100 if qtd else 0
+    dist = {}
+    maior = 0
+    unidades_loss = 0
+    for x in bloco:
+        gale = int(x.get("gale", 0))
+        maior = max(maior, gale)
+        if x["resultado"] == "green":
+            dist[gale] = dist.get(gale, 0) + 1
+        else:
+            limite = int(x.get("limite", 0))
+            unidades_loss += (2 ** (limite + 1)) - 1
+    linhas = []
+    for gale in sorted(dist):
+        nome = "✅ DIRETO" if gale == 0 else f"{_emoji_numero_gale(gale)} GALE {gale}"
+        linhas.append(f"{nome}: {dist[gale]}")
+    if not linhas:
+        linhas = ["— Nenhum GREEN neste bloco"]
+    saldo = greens - unidades_loss
+    if saldo > 0:
+        emoji, resultado = "🟢", "POSITIVO"
+    elif saldo < 0:
+        emoji, resultado = "🔴", "NEGATIVO"
+    else:
+        emoji, resultado = "⚪", "NEUTRO"
+
+    # O último bloco é sempre o bloco que acabou de ser fechado.
+    # A faixa é calculada pela quantidade GERAL de sinais já contabilizados,
+    # evitando divergência entre o título do bloco e os BLOCOS GERAIS.
+    geral_blocos = int(cfg.get("relatorio_geral_blocos", 0)) + 1
+    geral_sinais = int(cfg.get("relatorio_geral_sinais", 0)) + qtd
+    bloco_inicio = geral_sinais - qtd + 1
+    bloco_fim = geral_sinais
+    ultimo_bloco_txt = (
+        f"📚 ÚLTIMO BLOCO — {bloco_inicio} A {bloco_fim}\n\n"
+        f"📈 TAXA DE GREEN: {pctg:.1f}%\n"
+        f"💰 SALDO: {saldo:+d} unidades\n"
+        f"{emoji} RESULTADO: {resultado}"
+    ).replace('.', ',')
+
+    geral_greens = int(cfg.get("relatorio_geral_greens", 0)) + greens
+    geral_saldo = int(cfg.get("relatorio_geral_saldo", 0)) + saldo
+    geral_pct = (geral_greens / geral_sinais * 100) if geral_sinais else 0
+    if geral_saldo > 0:
+        geral_emoji, geral_resultado = "🟢", "POSITIVO"
+    elif geral_saldo < 0:
+        geral_emoji, geral_resultado = "🔴", "NEGATIVO"
+    else:
+        geral_emoji, geral_resultado = "⚪", "NEUTRO"
+    geral_txt = (
+        "📊 BLOCOS GERAIS\n\n"
+        f"📦 BLOCOS ANALISADOS: {geral_blocos}\n"
+        f"📈 TAXA GERAL DE GREEN: {geral_pct:.1f}%\n"
+        f"💰 SALDO GERAL: {geral_saldo:+d} unidades\n"
+        f"{geral_emoji} RESULTADO GERAL: {geral_resultado}"
+    ).replace('.', ',')
+    comparacao = ultimo_bloco_txt + "\n\n━━━━━━━━━━━━━━━━━━\n" + geral_txt
+
+    dados = dict(
+        qtd=qtd, greens=greens, loss=loss,
+        taxa_green=f"{pctg:.1f}".replace('.', ','), taxa_loss=f"{pctl:.1f}".replace('.', ','),
+        distribuicao="\n".join(linhas), seq_green=_relatorio_maior_sequencia(bloco, "green"),
+        seq_loss=_relatorio_maior_sequencia(bloco, "loss"), maior_gale=(f"G{maior}" if maior else "DIRETO"),
+        unidades_green=greens, unidades_loss=unidades_loss, saldo=f"{saldo:+d}",
+        emoji_resultado=emoji, resultado=resultado, comparacao=comparacao,
+    )
+    modelo = cfg.get("relatorio_texto") or RELATORIO_AUTOMATICO_MODELO
+    try:
+        texto = modelo.format(**dados)
+    except Exception:
+        texto = RELATORIO_AUTOMATICO_MODELO.format(**dados)
+    cfg["relatorio_anterior"] = {"pctg": pctg, "saldo": saldo}
+    cfg["relatorio_geral_blocos"] = geral_blocos
+    cfg["relatorio_geral_sinais"] = geral_sinais
+    cfg["relatorio_geral_greens"] = geral_greens
+    cfg["relatorio_geral_saldo"] = geral_saldo
+    return texto
+
+def _relatorio_registrar(modo, resultado, gale, limite):
+    configs = ESTRATEGIAS_GATILHO_CONFIG if modo == "gatilho" else ESTRATEGIAS_CONFIG
+    ativos = [(cid, c) for cid, c in configs.items() if c.get("ativa")]
+    if not ativos:
+        return
+    _, cfg = ativos[-1]
+    alvo = int(cfg.get("relatorio_qtd") or 0)
+    if alvo <= 0:
+        return
+    bloco = cfg.setdefault("relatorio_bloco", [])
+    bloco.append({"resultado": resultado, "gale": int(gale), "limite": int(limite)})
+    if len(bloco) < alvo:
+        return
+    usar = bloco[:alvo]
+    del bloco[:alvo]
+    try:
+        bot.send_message(ALERTAS_CHAT_ID, _relatorio_gerar(cfg, usar))
+    except Exception:
+        traceback.print_exc()
+
+
+def _desativar_para_alteracao(chat_id, modo):
+    cfg = _relatorio_cfg(chat_id, modo)
+    if not cfg.get("ativa"):
+        return False
+    _parar_monitor_real()
+    cfg["ativa"] = False
+    cfg["pausada"] = False
+    return True
+
+
+def _texto_seletor_estrategia_bot():
+    return (
+        "🧠 CONFIGURAR BOT E ATIVAR\n\n"
+        "📌 Escolha como o bot deverá operar o SURF.\n\n"
+        "🏄 SURF\n"
+        "Mantém a estratégia atual do bot exatamente como já funciona.\n\n"
+        "🎯 SURF — ENTRADA POR GATILHO\n"
+        "Usa um Gale do SURF como gatilho. Quando o Gale escolhido acontece, "
+        "a oportunidade imediatamente seguinte vira a entrada.\n\n"
+        "👇 Escolha a estratégia:"
+    )
+
+def _seletor_estrategia_bot_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton("🏄 SURF", callback_data="config_modo_surf_normal"))
+    m.add(telebot.types.InlineKeyboardButton("🎯 SURF — ENTRADA POR GATILHO", callback_data="gatcfg_menu"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR AO BOT", callback_data="menu_bot"))
+    return m
+
+def configurar_estrategia_markup(chat_id):
+    cfg = _cfg(chat_id)
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+
+    markup.add(telebot.types.InlineKeyboardButton(
+        "📖 MANUAL DO BOT", callback_data="config_manual"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        f"🔥 GALE DE GATILHO — {_gale_txt(cfg['gale_gatilho'])}",
+        callback_data="config_gale_menu"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        f"🏄 ESCOLHER SURF — {_surf_nome(cfg['surf'])}",
+        callback_data="config_surf_menu"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        f"🛡 LIMITE DE GALES — {_limite_txt(cfg['limite_gales'])}",
+        callback_data="config_limite_menu"
+    ))
+
+    aviso_txt = "NÃO CONFIGURADO" if cfg["aviso_antes"] is None else ("NÃO AVISAR" if cfg["aviso_antes"] == 0 else f"{cfg['aviso_antes']} antes")
+    markup.add(telebot.types.InlineKeyboardButton(
+        f"⚠️ CAMINHO ÚNICO CHEGANDO — {aviso_txt}",
+        callback_data="config_aviso_menu"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        f"📊 RELATÓRIO AUTOMÁTICO — {_relatorio_status(cfg)}",
+        callback_data="rel_menu"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "✍️ CONFIGURAR TEXTOS E IMAGENS",
+        callback_data="config_textos_menu"
+    ))
+
+    if cfg["ativa"] and not cfg["pausada"]:
+        markup.add(telebot.types.InlineKeyboardButton(
+            "⏸ PARAR BOT", callback_data="config_parar_bot"
+        ))
+    elif cfg["ativa"] and cfg["pausada"]:
+        markup.add(telebot.types.InlineKeyboardButton(
+            "▶️ INICIAR NOVAMENTE", callback_data="config_retomar_bot"
+        ))
+    else:
+        if _config_completa(cfg):
+            markup.add(telebot.types.InlineKeyboardButton(
+                "🟢 ATIVAR ESTRATÉGIA", callback_data="config_ativar_resumo"
+            ))
+        else:
+            markup.add(telebot.types.InlineKeyboardButton(
+                "⚙️ COMPLETE A CONFIGURAÇÃO", callback_data="config_incompleta"
+            ))
+
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🗑 EXCLUIR ESTRATÉGIA", callback_data="config_excluir_confirmar"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "⬅️ VOLTAR AO BOT", callback_data="menu_bot"
+    ))
+    return markup
+
+
+
+def _textos_menu_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    for chave in ("online", "offline", "chegando", "cancelado", "sinal", "green", "loss", "gales"):
+        titulo = _TEXTOS_CANAL_META[chave][0]
+        m.add(telebot.types.InlineKeyboardButton(titulo, callback_data=f"texto_menu:{chave}"))
+    m.add(telebot.types.InlineKeyboardButton("🧪 TESTAR TEXTOS NO CANAL", callback_data="texto_testar_canal"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="config_modo_surf_normal"))
+    return m
+
+def _texto_menu_principal():
+    return (
+        "✍️ CONFIGURAR TEXTOS E IMAGENS\n\n"
+        "AQUI VOCÊ PERSONALIZA AS FRASES E OS EMOJIS DAS MENSAGENS ENVIADAS AO CANAL.\n\n"
+        "📌 OS DADOS REAIS CALCULADOS PELO BOT NÃO SÃO ALTERADOS. "
+        "NÚMEROS, CORES, SURF, GALES E RESULTADOS CONTINUAM VINDO DA LÓGICA.\n\n"
+        "✅ GREEN E ❌ LOSS TAMBÉM PODEM USAR UMA IMAGEM PERSONALIZADA EM ALTA QUALIDADE.\n\n"
+        "👇 ESCOLHA QUAL MENSAGEM DESEJA CONFIGURAR:"
+    )
+
+def _texto_item_markup(chave):
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton("✏️ ALTERAR TEXTO", callback_data=f"texto_editar:{chave}"))
+    if chave == "green":
+        m.add(telebot.types.InlineKeyboardButton(
+            "🖼️ CONFIGURAR IMAGENS GREEN",
+            callback_data="green_imagens_menu"
+        ))
+    elif chave == "loss":
+        m.add(telebot.types.InlineKeyboardButton("🖼️ ALTERAR IMAGEM 4K", callback_data="texto_imagem:loss"))
+        m.add(telebot.types.InlineKeyboardButton("🗑 REMOVER IMAGEM PERSONALIZADA", callback_data="texto_imagem_remover:loss"))
+    m.add(telebot.types.InlineKeyboardButton("♻️ RESTAURAR PADRÃO", callback_data=f"texto_restaurar:{chave}"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="config_textos_menu"))
+    return m
+
+def _texto_item_painel(chat_id, chave):
+    titulo, explicacao = _TEXTOS_CANAL_META[chave]
+    atual = _texto_canal_modelo(chat_id, chave)
+    extras = ""
+    req = sorted(_TEXTOS_CANAL_REQUIRED.get(chave, set()))
+    if req:
+        extras = (
+            "\n\n🔒 DADOS AUTOMÁTICOS PROTEGIDOS:\n"
+            + " • ".join(req)
+            + "\n\nAO ALTERAR A FRASE, MANTENHA ESSES CAMPOS NO TEXTO. "
+              "O BOT PREENCHE OS VALORES REAIS AUTOMATICAMENTE."
+        )
+    if chave == "green":
+        extras += (
+            "\n\n🖼️ O GREEN PODE TER UMA IMAGEM DIFERENTE PARA CADA RESULTADO: "
+            "DIRETO / SEM GALE, GALE 1, GALE 2, GALE 3... ATÉ GALE 20. "
+            "A LÓGICA ESCOLHE AUTOMATICAMENTE A IMAGEM CORRETA QUANDO O GREEN ACONTECE. "
+            "A IMAGEM É ENVIADA SEPARADA DO TEXTO E DO REGISTRO DA OPERAÇÃO."
+        )
+    elif chave == "loss":
+        extras += (
+            "\n\n🖼️ A IMAGEM DO LOSS É ENVIADA SEPARADA DO TEXTO E DO REGISTRO DA OPERAÇÃO. "
+            "VOCÊ PODE ENVIAR UMA FOTO OU UM ARQUIVO DE IMAGEM EM ALTA QUALIDADE/4K."
+        )
+    return (
+        f"{titulo}\n\n"
+        f"{explicacao}\n\n"
+        "VOCÊ PODE ESCREVER UMA MENSAGEM CURTA OU GRANDE E USAR OS EMOJIS QUE QUISER."
+        f"{extras}\n\n"
+        "📌 TEXTO ATUAL:\n\n"
+        f"{atual}\n\n"
+        "👇 ESCOLHA O QUE DESEJA FAZER:"
+    )
+
+def _receber_texto_personalizado(message, chave):
+    chat_id = message.chat.id
+    novo = (message.text or "").strip()
+    if not novo:
+        bot.send_message(chat_id, "❌ TEXTO VAZIO. NADA FOI ALTERADO.", reply_markup=_texto_item_markup(chave))
+        return
+    faltando = [campo for campo in _TEXTOS_CANAL_REQUIRED.get(chave, set()) if campo not in novo]
+    if faltando:
+        bot.send_message(
+            chat_id,
+            "❌ NÃO FOI POSSÍVEL SALVAR.\n\n"
+            "MANTENHA OS DADOS AUTOMÁTICOS OBRIGATÓRIOS:\n"
+            + "\n".join(f"• {x}" for x in sorted(faltando))
+            + "\n\nISSO GARANTE QUE A PERSONALIZAÇÃO NÃO ALTERE A LÓGICA DO BOT.",
+            reply_markup=_texto_item_markup(chave),
+        )
+        return
+    _textos_canal_cfg(chat_id)["textos"][chave] = novo
+    bot.send_message(
+        chat_id,
+        "✅ TEXTO SALVO COM SUCESSO.\n\nNO CANAL ELE SERÁ ENVIADO EM MAIÚSCULAS.",
+        reply_markup=_texto_item_markup(chave),
+    )
+
+def _green_limite_imagens(chat_id):
+    # O cadastro das imagens GREEN não depende do limite operacional.
+    # Deixamos sempre DIRETO + GALE 1 até GALE 20 disponíveis.
+    return 20
+
+def _green_nome_resultado(gale):
+    gale = int(gale)
+    return "DIRETO / SEM GALE" if gale == 0 else f"GALE {gale}"
+
+def _green_imagens_markup(chat_id):
+    limite = _green_limite_imagens(chat_id)
+    imagens = _textos_canal_cfg(chat_id).get("green_imagens", {})
+
+    m = telebot.types.InlineKeyboardMarkup(row_width=2)
+
+    botoes = []
+    for gale in range(0, limite + 1):
+        salvo = "✅" if str(gale) in imagens else "▫️"
+        nome = "DIRETO / SEM GALE" if gale == 0 else f"GALE {gale}"
+        botoes.append(
+            telebot.types.InlineKeyboardButton(
+                f"{salvo} {nome}",
+                callback_data=f"green_imagem_item:{gale}"
+            )
+        )
+
+    for i in range(0, len(botoes), 2):
+        m.row(*botoes[i:i+2])
+
+    m.add(telebot.types.InlineKeyboardButton(
+        "🗑 REMOVER TODAS AS IMAGENS GREEN",
+        callback_data="green_imagens_remover_todas"
+    ))
+    m.add(telebot.types.InlineKeyboardButton(
+        "⬅️ VOLTAR",
+        callback_data="texto_menu:green"
+    ))
+    return m
+
+def _green_imagens_texto(chat_id):
+    return (
+        "🖼️ IMAGENS DO GREEN\n\n"
+        "VOCÊ PODE CADASTRAR UMA IMAGEM DIFERENTE PARA CADA RESULTADO DO GREEN.\n\n"
+        "📌 EXEMPLO:\n"
+        "GREEN DIRETO / SEM GALE → IMAGEM DO DIRETO\n"
+        "GREEN GALE 1 → IMAGEM DO GALE 1\n"
+        "GREEN GALE 2 → IMAGEM DO GALE 2\n"
+        "GREEN GALE 3 → IMAGEM DO GALE 3\n"
+        "...\n\n"
+        "🤖 QUANDO A OPERAÇÃO ACERTAR, O BOT IDENTIFICA AUTOMATICAMENTE "
+        "EM QUAL GALE BATEU E ENVIA A IMAGEM CORRESPONDENTE.\n\n"
+        "🛡 AS IMAGENS FICAM DISPONÍVEIS PARA CONFIGURAÇÃO DO DIRETO / SEM GALE "
+        "ATÉ O GALE 20, INDEPENDENTEMENTE DO LIMITE OPERACIONAL CONFIGURADO.\n\n"
+        "✅ = IMAGEM PERSONALIZADA CADASTRADA\n"
+        "▫️ = USANDO A IMAGEM PADRÃO DO BOT\n\n"
+        "👇 ESCOLHA QUAL GREEN DESEJA CONFIGURAR:"
+    )
+
+def _green_imagem_item_markup(gale):
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton(
+        "🖼️ ENVIAR / TROCAR IMAGEM 4K",
+        callback_data=f"green_imagem_enviar:{int(gale)}"
+    ))
+    m.add(telebot.types.InlineKeyboardButton(
+        "🗑 REMOVER IMAGEM DESTE GREEN",
+        callback_data=f"green_imagem_remover:{int(gale)}"
+    ))
+    m.add(telebot.types.InlineKeyboardButton(
+        "⬅️ VOLTAR",
+        callback_data="green_imagens_menu"
+    ))
+    return m
+
+def _receber_imagem_green_gale(message, gale):
+    chat_id = message.chat.id
+    gale = int(gale)
+    item = None
+
+    if getattr(message, "photo", None):
+        item = {"tipo": "photo", "file_id": message.photo[-1].file_id}
+    elif getattr(message, "document", None):
+        mime = (message.document.mime_type or "").lower()
+        if mime.startswith("image/"):
+            item = {"tipo": "document", "file_id": message.document.file_id}
+
+    if not item:
+        bot.send_message(
+            chat_id,
+            "❌ ENVIE UMA FOTO OU UM ARQUIVO DE IMAGEM.",
+            reply_markup=_green_imagem_item_markup(gale),
+        )
+        return
+
+    cfg_txt = _textos_canal_cfg(chat_id)
+    cfg_txt.setdefault("green_imagens", {})[str(gale)] = item
+
+    bot.send_message(
+        chat_id,
+        f"✅ IMAGEM DO GREEN {_green_nome_resultado(gale)} SALVA.\n\n"
+        "🤖 QUANDO O GREEN BATER NESTE RESULTADO, O BOT VAI USAR AUTOMATICAMENTE ESTA IMAGEM.",
+        reply_markup=_green_imagem_item_markup(gale),
+    )
+
+def _receber_imagem_personalizada(message, chave):
+    chat_id = message.chat.id
+    item = None
+    if getattr(message, "photo", None):
+        item = {"tipo": "photo", "file_id": message.photo[-1].file_id}
+    elif getattr(message, "document", None):
+        mime = (message.document.mime_type or "").lower()
+        if mime.startswith("image/"):
+            item = {"tipo": "document", "file_id": message.document.file_id}
+    if not item:
+        bot.send_message(
+            chat_id,
+            "❌ ENVIE UMA FOTO OU UM ARQUIVO DE IMAGEM.",
+            reply_markup=_texto_item_markup(chave),
+        )
+        return
+    _textos_canal_cfg(chat_id)[f"{chave}_imagem"] = item
+    bot.send_message(
+        chat_id,
+        f"✅ IMAGEM DO {chave.upper()} SALVA.\n\nELA SERÁ ENVIADA SEPARADA DAS MENSAGENS.",
+        reply_markup=_texto_item_markup(chave),
+    )
+
+def _enviar_imagem_resultado(chat_id, chave, gale=None):
+    cfg_txt = _textos_canal_cfg(chat_id)
+    destino = _destino_canal_surf(chat_id)
+
+    if chave == "green":
+        chave_gale = str(int(gale or 0))
+        imagem = cfg_txt.get("green_imagens", {}).get(chave_gale)
+
+        # Compatibilidade: se ainda houver uma imagem GREEN da versão anterior,
+        # ela serve como fallback enquanto não houver imagem específica do Gale.
+        if imagem is None:
+            imagem = cfg_txt.get("green_imagem")
+
+        if imagem:
+            if imagem["tipo"] == "document":
+                bot.send_document(destino, imagem["file_id"])
+            else:
+                bot.send_photo(destino, imagem["file_id"])
+            return
+
+        bot.send_photo(destino, _alerta_card_bytes("green", gale))
+        return
+
+    imagem = cfg_txt.get("loss_imagem")
+    if imagem:
+        if imagem["tipo"] == "document":
+            bot.send_document(destino, imagem["file_id"])
+        else:
+            bot.send_photo(destino, imagem["file_id"])
+        return
+
+    bot.send_photo(destino, _alerta_card_bytes("loss"))
+
+
+
+
+def _gatcfg_midias(chat_id):
+    cfg = _cfg_gatilho(chat_id)
+    cfg.setdefault("green_imagens", {})
+    cfg.setdefault("loss_imagem", None)
+    return cfg
+
+def _gatcfg_green_nome(gale):
+    gale = int(gale)
+    return "DIRETO / SEM GALE" if gale == 0 else f"GALE {gale}"
+
+def _gatcfg_midias_markup(chat_id):
+    cfg = _gatcfg_midias(chat_id)
+    greens = cfg.get("green_imagens", {})
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    total_green = sum(1 for n in range(0, 21) if str(n) in greens)
+    m.add(telebot.types.InlineKeyboardButton(
+        f"🟢 IMAGENS GREEN — {total_green}/21",
+        callback_data="gatcfg_green_menu"
+    ))
+    m.add(telebot.types.InlineKeyboardButton(
+        f"🔴 IMAGEM LOSS — {'✅ SALVA' if cfg.get('loss_imagem') else '▫️ PADRÃO'}",
+        callback_data="gatcfg_loss_menu"
+    ))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="gatcfg_menu"))
+    return m
+
+def _gatcfg_green_markup(chat_id):
+    greens = _gatcfg_midias(chat_id).get("green_imagens", {})
+    m = telebot.types.InlineKeyboardMarkup(row_width=2)
+    botoes = []
+    for gale in range(0, 21):
+        salvo = "✅" if str(gale) in greens else "▫️"
+        botoes.append(telebot.types.InlineKeyboardButton(
+            f"{salvo} {_gatcfg_green_nome(gale)}",
+            callback_data=f"gatcfg_green_item:{gale}"
+        ))
+    for i in range(0, len(botoes), 2):
+        m.row(*botoes[i:i+2])
+    m.add(telebot.types.InlineKeyboardButton(
+        "🗑 REMOVER TODAS AS IMAGENS GREEN",
+        callback_data="gatcfg_green_remover_todas"
+    ))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="gatcfg_midias"))
+    return m
+
+def _gatcfg_green_item_markup(gale):
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton(
+        "🖼️ ENVIAR / TROCAR IMAGEM",
+        callback_data=f"gatcfg_green_enviar:{int(gale)}"
+    ))
+    m.add(telebot.types.InlineKeyboardButton(
+        "🗑 REMOVER IMAGEM DESTE GREEN",
+        callback_data=f"gatcfg_green_remover:{int(gale)}"
+    ))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="gatcfg_green_menu"))
+    return m
+
+def _gatcfg_loss_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton(
+        "🖼️ ENVIAR / TROCAR IMAGEM LOSS",
+        callback_data="gatcfg_loss_enviar"
+    ))
+    m.add(telebot.types.InlineKeyboardButton(
+        "🗑 REMOVER IMAGEM LOSS",
+        callback_data="gatcfg_loss_remover"
+    ))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="gatcfg_midias"))
+    return m
+
+def _gatcfg_receber_green(message, gale):
+    chat_id = message.chat.id
+    item = None
+    if getattr(message, "photo", None):
+        item = {"tipo": "photo", "file_id": message.photo[-1].file_id}
+    elif getattr(message, "document", None):
+        mime = (message.document.mime_type or "").lower()
+        if mime.startswith("image/"):
+            item = {"tipo": "document", "file_id": message.document.file_id}
+    if not item:
+        bot.send_message(chat_id, "❌ ENVIE UMA FOTO OU ARQUIVO DE IMAGEM.",
+                         reply_markup=_gatcfg_green_item_markup(gale))
+        return
+    _gatcfg_midias(chat_id).setdefault("green_imagens", {})[str(int(gale))] = item
+    bot.send_message(
+        chat_id,
+        f"✅ IMAGEM GREEN {_gatcfg_green_nome(gale)} SALVA PARA A ENTRADA POR GATILHO.",
+        reply_markup=_gatcfg_green_item_markup(gale)
+    )
+
+def _gatcfg_receber_loss(message):
+    chat_id = message.chat.id
+    item = None
+    if getattr(message, "photo", None):
+        item = {"tipo": "photo", "file_id": message.photo[-1].file_id}
+    elif getattr(message, "document", None):
+        mime = (message.document.mime_type or "").lower()
+        if mime.startswith("image/"):
+            item = {"tipo": "document", "file_id": message.document.file_id}
+    if not item:
+        bot.send_message(chat_id, "❌ ENVIE UMA FOTO OU ARQUIVO DE IMAGEM.",
+                         reply_markup=_gatcfg_loss_markup())
+        return
+    _gatcfg_midias(chat_id)["loss_imagem"] = item
+    bot.send_message(chat_id, "✅ IMAGEM LOSS SALVA PARA A ENTRADA POR GATILHO.",
+                     reply_markup=_gatcfg_loss_markup())
+
+def _gatcfg_enviar_imagem_resultado(chave, gale=None):
+    chat_id = _chat_textos_ativo()
+    # O chat de configuração ativo é o mesmo dono da estratégia.
+    if chat_id is None:
+        # fallback para a configuração ativa
+        ativos = [cid for cid, c in ESTRATEGIAS_GATILHO_CONFIG.items()
+                  if c.get("ativa") and not c.get("pausada")]
+        chat_id = ativos[0] if ativos else None
+
+    cfg = _gatcfg_midias(chat_id) if chat_id is not None else {}
+    destino = ALERTAS_CHAT_ID
+    if chave == "green":
+        imagem = cfg.get("green_imagens", {}).get(str(int(gale or 0)))
+        if imagem:
+            if imagem["tipo"] == "document":
+                bot.send_document(destino, imagem["file_id"])
+            else:
+                bot.send_photo(destino, imagem["file_id"])
+            return
+        bot.send_photo(destino, _alerta_card_bytes("green", gale))
+        return
+
+    imagem = cfg.get("loss_imagem")
+    if imagem:
+        if imagem["tipo"] == "document":
+            bot.send_document(destino, imagem["file_id"])
+        else:
+            bot.send_photo(destino, imagem["file_id"])
+        return
+    bot.send_photo(destino, _alerta_card_bytes("loss"))
+
+
+def _gatcfg_completa(cfg):
+    return all(cfg.get(k) is not None for k in ("gale_gatilho", "surf", "limite_gales"))
+
+def _texto_gatcfg_menu(chat_id):
+    cfg = _cfg_gatilho(chat_id)
+    if cfg["ativa"] and not cfg["pausada"]:
+        status = "🟢 ATIVA"
+    elif cfg["ativa"] and cfg["pausada"]:
+        status = "⏸ PAUSADA"
+    else:
+        status = "🔴 DESATIVADA"
+    return (
+        "🎯 SURF — ENTRADA POR GATILHO\n\n"
+        "📌 COMO FUNCIONA\n\n"
+        "Esta estratégia usa os Gales do SURF como GATILHO para liberar uma entrada.\n\n"
+        "🔥 Exemplo com G3:\n"
+        "G1 → G2 → G3 🔥 GATILHO\n"
+        "🎯 A oportunidade imediatamente seguinte é a ENTRADA.\n\n"
+        "⚠️ O G3 não é a entrada. Ele apenas confirma que a próxima oportunidade será utilizada.\n\n"
+        "❌ Se a entrada não bater, o bot não continua apostando nas rodadas seguintes.\n"
+        "⏳ Ele espera um NOVO G3 acontecer.\n"
+        "🔥 Novo G3 → 🎯 nova oportunidade.\n\n"
+        "A progressão da operação acontece ENTRE OS GATILHOS: "
+        "Direto → novo gatilho/G1 → novo gatilho/G2... até o limite escolhido.\n\n"
+        f"🔥 Gale-gatilho: {_gale_txt(cfg['gale_gatilho'])}\n"
+        f"🏄 SURF: {_surf_nome(cfg['surf'])}\n"
+        f"🛡 Limite de Gales: {_limite_txt(cfg['limite_gales'])}\n"
+        f"⚠️ Aviso antes do gatilho: {'NÃO AVISAR' if cfg.get('aviso_antes', 2) == 0 else str(cfg.get('aviso_antes', 2)) + ' Gale(s) antes'}\n"
+        f"📡 Status: {status}\n\n"
+        "👇 Configure a estratégia:"
+    )
+
+def _gatcfg_markup(chat_id):
+    cfg = _cfg_gatilho(chat_id)
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton(
+        f"🔥 GALE-GATILHO — {_gale_txt(cfg['gale_gatilho'])}", callback_data="gatcfg_gale_menu"))
+    m.add(telebot.types.InlineKeyboardButton(
+        f"🏄 ESCOLHER SURF — {_surf_nome(cfg['surf'])}", callback_data="gatcfg_surf_menu"))
+    m.add(telebot.types.InlineKeyboardButton(
+        f"🛡 LIMITE DE GALES — {_limite_txt(cfg['limite_gales'])}", callback_data="gatcfg_limite_menu"))
+    m.add(telebot.types.InlineKeyboardButton(
+        f"⚠️ AVISO ANTES — {'NÃO AVISAR' if cfg.get('aviso_antes', 2) == 0 else str(cfg.get('aviso_antes', 2)) + ' GALE(S)'}", callback_data="gatcfg_aviso_menu"))
+    m.add(telebot.types.InlineKeyboardButton(
+        f"📊 RELATÓRIO AUTOMÁTICO — {_relatorio_status(cfg)}", callback_data="gatrel_menu"))
+    m.add(telebot.types.InlineKeyboardButton(
+        "🖼️ GREEN / LOSS — ENTRADA POR GATILHO", callback_data="gatcfg_midias"))
+    if cfg["ativa"] and not cfg["pausada"]:
+        m.add(telebot.types.InlineKeyboardButton("⏸ PARAR BOT", callback_data="gatcfg_parar"))
+    elif cfg["ativa"] and cfg["pausada"]:
+        m.add(telebot.types.InlineKeyboardButton("▶️ INICIAR NOVAMENTE", callback_data="gatcfg_ativar"))
+    elif _gatcfg_completa(cfg):
+        m.add(telebot.types.InlineKeyboardButton("🟢 ATIVAR ESTRATÉGIA", callback_data="gatcfg_ativar"))
+    else:
+        m.add(telebot.types.InlineKeyboardButton("⚙️ COMPLETE A CONFIGURAÇÃO", callback_data="gatcfg_incompleta"))
+    m.add(telebot.types.InlineKeyboardButton("🗑 EXCLUIR CONFIGURAÇÃO", callback_data="gatcfg_excluir"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="configurar_estrategia"))
+    return m
+
+def _gatcfg_gale_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=3)
+    bs = [telebot.types.InlineKeyboardButton(f"G{n}", callback_data=f"gatcfg_gale_set:{n}") for n in range(1, 21)]
+    for i in range(0, len(bs), 3):
+        m.row(*bs[i:i+3])
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="gatcfg_menu"))
+    return m
+
+def _gatcfg_surf_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton("🔴 SURF 2 VERMELHOS", callback_data="gatcfg_surf_set:vermelho"))
+    m.add(telebot.types.InlineKeyboardButton("⚫ SURF 2 PRETOS", callback_data="gatcfg_surf_set:preto"))
+    m.add(telebot.types.InlineKeyboardButton("🔴⚫ OS DOIS", callback_data="gatcfg_surf_set:ambos"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="gatcfg_menu"))
+    return m
+
+def _gatcfg_aviso_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=2)
+    botoes = [
+        telebot.types.InlineKeyboardButton(
+            f"{n} GALE{'S' if n > 1 else ''} ANTES",
+            callback_data=f"gatcfg_aviso_set:{n}"
+        )
+        for n in range(1, 6)
+    ]
+    for i in range(0, len(botoes), 2):
+        m.row(*botoes[i:i+2])
+    m.add(telebot.types.InlineKeyboardButton("🚫 NÃO AVISAR", callback_data="gatcfg_aviso_set:0"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="gatcfg_menu"))
+    return m
+
+
+def _gatcfg_limite_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=3)
+    bs = [telebot.types.InlineKeyboardButton(f"G{n}", callback_data=f"gatcfg_limite_set:{n}") for n in range(1, 21)]
+    for i in range(0, len(bs), 3):
+        m.row(*bs[i:i+3])
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="gatcfg_menu"))
+    return m
+
+def _texto_configurar_estrategia(chat_id):
+    cfg = _cfg(chat_id)
+    if cfg["ativa"] and not cfg["pausada"]:
+        status = "🟢 ATIVA"
+    elif cfg["ativa"] and cfg["pausada"]:
+        status = "⏸ PAUSADA"
+    else:
+        status = "🔴 DESATIVADA"
+
+    aviso = _aviso_txt(cfg["aviso_antes"])
+
+    return (
+        "🧠 CONFIGURAR BOT E ATIVAR\n\n"
+        "Monte aqui a lógica que o bot deverá acompanhar para gerar os sinais.\n\n"
+        f"🔥 Gale de gatilho: {_gale_txt(cfg['gale_gatilho'])}\n"
+        f"🏄 SURF: {_surf_nome(cfg['surf'])}\n"
+        f"🛡 Limite de Gales: {_limite_txt(cfg['limite_gales'])}\n"
+        f"⚠️ Caminho único chegando: {aviso}\n"
+        "🧬 Caminhos: somente caminhos únicos; repetidos/convergentes são descartados.\n\n"
+        f"📡 Status: {status}\n\n"
+        "👇 Escolha o que deseja configurar:"
+    )
+
+
+def _texto_manual():
+    return (
+        "📖 MANUAL — ESTRATÉGIAS DO BOT\n\n"
+        "🧬 CAMINHOS ÚNICOS\n"
+        "O bot trabalha somente com caminhos únicos reais.\n"
+        "Quando vários pontos de início chegam exatamente ao mesmo caminho, "
+        "eles são tratados como repetidos/convergentes e não criam sinais diferentes.\n\n"
+        "🔥 GALE DE GATILHO\n"
+        "Você escolhe o Gale que deseja monitorar. O sinal só é confirmado se o caminho "
+        "realmente alcançar esse Gale.\n\n"
+        "🏄 ESCOLHER SURF\n"
+        "Define se a estratégia acompanha o SURF 2 VERMELHOS, SURF 2 PRETOS ou os dois. "
+        "Quando os dois são escolhidos, cada SURF continua sendo analisado separadamente.\n\n"
+        "🛡 LIMITE DE GALES\n"
+        "Define até qual Gale a operação poderá ser acompanhada depois que a entrada for liberada.\n\n"
+        "⚠️ CAMINHO ÚNICO CHEGANDO\n"
+        "Define quantos Gales antes do alvo o bot começa a avisar que um caminho único está chegando. "
+        "Se o caminho quebrar antes do alvo, o acompanhamento é cancelado.\n\n"
+        "🎯 SINAL\n"
+        "Ao chegar ao Gale configurado, o bot libera a entrada informando a cor da entrada "
+        "e depois de qual número/cor ela foi confirmada."
+    )
+
+
+def _voltar_config_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="config_modo_surf_normal"))
+    return m
+
+
+def _gale_menu_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=3)
+    botoes = [
+        telebot.types.InlineKeyboardButton(f"G{g}", callback_data=f"config_gale_set:{g}")
+        for g in range(2, 21)
+    ]
+    for i in range(0, len(botoes), 3):
+        m.row(*botoes[i:i+3])
+    m.add(telebot.types.InlineKeyboardButton(
+        "✏️ DIGITAR OUTRO GALE",
+        callback_data="config_placeholder_digitacao:gale"
+    ))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="config_modo_surf_normal"))
+    return m
+
+
+def _texto_gale_menu(chat_id):
+    cfg = _cfg(chat_id)
+    return (
+        "🔥 GALE DE GATILHO\n\n"
+        "📌 PARA QUE SERVE ESTA CONFIGURAÇÃO?\n\n"
+        "Esta opção define em qual Gale o caminho único precisa chegar para confirmar a estratégia.\n\n"
+        "📌 Exemplo:\n"
+        "Se escolher G12, o bot acompanha o caminho e só confirma o sinal quando realmente chegar ao G12.\n\n"
+        f"🔥 Gale atual configurado: {_gale_txt(cfg['gale_gatilho'])}\n\n"
+        "👇 Escolha o Gale de gatilho:"
+    )
+
+
+def _surf_menu_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton("🔴 SURF 2 VERMELHOS", callback_data="config_surf_set:vermelho"))
+    m.add(telebot.types.InlineKeyboardButton("⚫ SURF 2 PRETOS", callback_data="config_surf_set:preto"))
+    m.add(telebot.types.InlineKeyboardButton("🔴⚫ OS DOIS", callback_data="config_surf_set:ambos"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="config_modo_surf_normal"))
+    return m
+
+
+def _texto_surf_menu(chat_id):
+    cfg = _cfg(chat_id)
+    return (
+        "🏄 ESCOLHER SURF\n\n"
+        "📌 PARA QUE SERVE ESTA CONFIGURAÇÃO?\n\n"
+        "Esta opção define qual caminho do SURF o bot deverá acompanhar para procurar o Gale de gatilho configurado.\n\n"
+        "O bot continuará trabalhando somente com caminhos únicos, eliminando caminhos repetidos/convergentes.\n\n"
+        "Você pode acompanhar somente um dos SURFs ou deixar os dois funcionando ao mesmo tempo.\n\n"
+        "🔴 SURF 2 VERMELHOS\n"
+        "🔴🔴 → ⚫⚫ → 🔴🔴 → ⚫⚫...\n\n"
+        "⚫ SURF 2 PRETOS\n"
+        "⚫⚫ → 🔴🔴 → ⚫⚫ → 🔴🔴...\n\n"
+        "🔴⚫ OS DOIS\n"
+        "O bot acompanha os dois SURFs simultaneamente, mas cada caminho continua sendo analisado separadamente.\n\n"
+        f"📍 O ponto inicial pode estar relacionado a:\n\n⚪ Após BRANCO\n🔴 Após VERMELHO\n⚫ Após PRETO\n\n📍 SURF configurado atualmente:\n{_surf_nome(cfg['surf'])}\n\n"
+        "👇 Escolha qual SURF deseja acompanhar:"
+    )
+
+
+def _limite_menu_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=3)
+    botoes = [
+        telebot.types.InlineKeyboardButton(f"G{g}", callback_data=f"config_limite_set:{g}")
+        for g in range(1, 13)
+    ]
+    for i in range(0, len(botoes), 3):
+        m.row(*botoes[i:i+3])
+    m.add(telebot.types.InlineKeyboardButton(
+        "✏️ DIGITAR OUTRO LIMITE",
+        callback_data="config_placeholder_digitacao:limite"
+    ))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="config_modo_surf_normal"))
+    return m
+
+
+def _texto_limite_menu(chat_id):
+    cfg = _cfg(chat_id)
+    return (
+        "🛡 LIMITE DE GALES\n\n"
+        "📌 PARA QUE SERVE ESTA CONFIGURAÇÃO?\n\n"
+        "Esta opção define até qual Gale o bot poderá acompanhar uma entrada depois que o sinal for confirmado.\n\n"
+        "Exemplo:\n"
+        "Se o limite escolhido for G6, o bot acompanhará:\n"
+        "DIRETO → G1 → G2 → G3 → G4 → G5 → G6\n\n"
+        "✅ Se bater em qualquer etapa, encerra como GREEN.\n"
+        "❌ Se não bater até G6, encerra como LOSS — STOP G6.\n\n"
+        "💡 LEMBRE-SE\n"
+        "Defina seu limite de Gales de acordo com seu objetivo de lucro e com o risco que você está disposto a assumir.\n"
+        "Quanto maior o limite de Gales, maior pode ser a exposição da operação.\n\n"
+        f"📍 Limite configurado atualmente: {_limite_txt(cfg['limite_gales'])}\n\n"
+        "👇 Escolha o limite da operação:"
+    )
+
+
+def _aviso_menu_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    for n in range(1, 6):
+        m.add(telebot.types.InlineKeyboardButton(
+            f"{n} GALE{'S' if n > 1 else ''} ANTES",
+            callback_data=f"config_aviso_set:{n}"
+        ))
+    m.add(telebot.types.InlineKeyboardButton("🔕 NÃO AVISAR", callback_data="config_aviso_set:0"))
+    m.add(telebot.types.InlineKeyboardButton(
+        "✏️ DIGITAR OUTRA QUANTIDADE",
+        callback_data="config_placeholder_digitacao:aviso"
+    ))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="config_modo_surf_normal"))
+    return m
+
+
+def _texto_aviso_menu(chat_id):
+    cfg = _cfg(chat_id)
+    alvo = cfg["gale_gatilho"]
+    antes = cfg["aviso_antes"]
+    atual_txt = _aviso_txt(antes)
+    if alvo is None:
+        exemplo_txt = "Configure primeiro o Gale de gatilho para calcular onde o primeiro aviso acontecerá."
+    elif antes is None:
+        exemplo_txt = "Escolha abaixo quantos Gales antes deseja receber o primeiro aviso."
+    elif antes == 0:
+        exemplo_txt = "Sem pré-alerta. O bot só enviará mensagem quando o gatilho for confirmado."
+    else:
+        primeiro = max(0, alvo - antes)
+        exemplo_txt = f"Com o alvo em G{alvo}, o primeiro aviso será em G{primeiro}."
+    return (
+        "⚠️ CAMINHO ÚNICO CHEGANDO\n\n"
+        "📌 PARA QUE SERVE ESTA CONFIGURAÇÃO?\n\n"
+        "Esta opção define quando o bot deve começar a avisar que um caminho único está se aproximando do Gale de gatilho.\n\n"
+        f"🔥 Gale de gatilho: {_gale_txt(alvo)}\n"
+        f"📍 Configuração atual: {atual_txt}\n\n"
+        f"{exemplo_txt}\n\n"
+        "Se o caminho acertar antes de chegar ao Gale de gatilho, o acompanhamento é cancelado automaticamente.\n\n"
+        "👇 Escolha quando deseja receber o primeiro aviso:"
+    )
+
+
+def _texto_resumo_ativacao(chat_id):
+    cfg = _cfg(chat_id)
+    aviso = "NÃO AVISAR" if cfg["aviso_antes"] == 0 else f"{cfg['aviso_antes']} Gale(s) antes"
+    primeiro = max(0, cfg["gale_gatilho"] - cfg["aviso_antes"]) if cfg["aviso_antes"] else None
+
+    linhas = [
+        "🟢 ATIVAR ESTRATÉGIA",
+        "",
+        "📋 CONFIRA SUA CONFIGURAÇÃO",
+        "",
+        f"🔥 Gale de gatilho: G{cfg['gale_gatilho']}",
+        f"🏄 SURF: {_surf_nome(cfg['surf'])}",
+        f"🛡 Limite da operação: G{cfg['limite_gales']}",
+        f"⚠️ Caminho único chegando: {aviso}",
+        "🧬 Caminhos: somente caminhos únicos.",
+        "🔁 Repetidos/convergentes são descartados.",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        "📡 COMO O BOT VAI TRABALHAR",
+    ]
+    if primeiro is not None:
+        linhas.append(f"⚠️ Primeiro aviso: G{primeiro}")
+    linhas.append(f"🎯 Confirmação do sinal: G{cfg['gale_gatilho']}")
+    linhas += [
+        "",
+        f"Após confirmar: DIRETO → G1 → ... → G{cfg['limite_gales']}",
+        "✅ Acertou → GREEN",
+        f"❌ Não acertou até G{cfg['limite_gales']} → LOSS",
+    ]
+    return "\n".join(linhas)
+
+
+def _ativar_resumo_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton(
+        "🟢 CONFIRMAR E ATIVAR",
+        callback_data="config_confirmar_ativar"
+    ))
+    m.add(telebot.types.InlineKeyboardButton(
+        "⬅️ VOLTAR E ALTERAR",
+        callback_data="config_modo_surf_normal"
+    ))
+    return m
+
+
+def _texto_bot_ativada(chat_id):
+    cfg = _cfg(chat_id)
+    aviso = "NÃO AVISAR" if cfg["aviso_antes"] == 0 else f"{cfg['aviso_antes']} Gale(s) antes"
+
+    return (
+        "📡 SINAIS ONLINE\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🤖 BOT ONLINE\n\n"
+        "🟢 ESTRATÉGIA ATIVADA\n\n"
+        f"🔥 Gale de gatilho: G{cfg['gale_gatilho']}\n"
+        f"🏄 SURF: {_surf_nome(cfg['surf'])}\n"
+        f"🛡 Limite da operação: G{cfg['limite_gales']}\n"
+        f"⚠️ Aviso: {aviso}\n"
+        "🧬 Somente caminhos únicos\n\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "📍 MONITORAMENTO INICIADO\n\n"
+        "📡 Aguardando oportunidade..."
+    )
+
+
+def _texto_canal_ativada(chat_id):
+    return _render_texto_canal(chat_id, "online")
+
+
+def _zerar_estado_sessao_online():
+    """Descarta qualquer acompanhamento/sinal da sessão anterior.
+
+    A configuração escolhida pelo usuário é preservada.
+    O histórico de 2.000 rodadas também é preservado para análise.
+    """
+    global alertas_surfe_operacoes, alertas_surfe_sinais_emitidos
+    global alertas_surfe_caminhos_unicos_emitidos, alertas_surfe_prealerta
+    global alertas_surfe_registro, alertas_surfe_registro_sinais
+    global alertas_surfe_registro_sinais_seq, alertas_surfe_registro_sinais_vistos_chat
+    global alertas_surfe_stats, alertas_surfe_ultima_rodada_detectada
+    global alertas_surfe_ultimo_atraso, alertas_surfe_total_novas
+    global alertas_gatilho_nivel_aposta
+    global alertas_gatilho_status_message_id, alertas_gatilho_caminho_resultados
+    global alertas_gatilho_espera_message_id, alertas_gatilho_chegando_message_id
+    global alertas_gatilho_caminho_message_id, alertas_gatilho_entrada_message_id, alertas_gatilho_prealerta
+    global alertas_gatilho_total_greens, alertas_gatilho_total_loss
+
+    with alertas_surfe_lock:
+        alertas_surfe_operacoes = {}
+        alertas_surfe_sinais_emitidos = set()
+        alertas_surfe_caminhos_unicos_emitidos = set()
+        alertas_surfe_prealerta = None
+        caminho_ao_vivo_marcas.clear()
+        alertas_surfe_registro.clear()
+        alertas_surfe_registro_sinais.clear()
+        alertas_surfe_registro_sinais_seq = 0
+        alertas_surfe_registro_sinais_vistos_chat.clear()
+        alertas_surfe_stats = {
+            "green": 0,
+            "loss": 0,
+            "direto": 0,
+            "gales": {n: 0 for n in range(1, ALERTAS_SURF_STOP_GALE + 1)},
+        }
+        alertas_surfe_ultima_rodada_detectada = None
+        alertas_surfe_ultimo_atraso = None
+        alertas_surfe_total_novas = 0
+        alertas_gatilho_nivel_aposta = 0
+        alertas_gatilho_status_message_id = None
+        alertas_gatilho_espera_message_id = None
+        alertas_gatilho_chegando_message_id = None
+        alertas_gatilho_caminho_message_id = None
+        alertas_gatilho_entrada_message_id = None
+        alertas_gatilho_caminho_resultados = []
+        alertas_gatilho_prealerta = None
+        alertas_gatilho_total_greens = 0
+        alertas_gatilho_total_loss = 0
+
+
+
+def _configurar_e_iniciar_monitor_real(chat_id):
+    """Aplica a configuração atual e inicia uma sessão NOVA do monitor ao vivo."""
+    global ALERTAS_SURF_GATILHO, ALERTAS_SURF_STOP_GALE, ALERTAS_SURF_AVISO_ANTES
+    global ALERTAS_MODO_ESTRATEGIA, alertas_gatilho_nivel_aposta
+    global alertas_surfe_ativos
+
+    cfg = _cfg(chat_id)
+    ALERTAS_MODO_ESTRATEGIA = "surf"
+    alertas_gatilho_nivel_aposta = 0
+    ALERTAS_SURF_GATILHO = int(cfg["gale_gatilho"])
+    ALERTAS_SURF_STOP_GALE = int(cfg["limite_gales"])
+    ALERTAS_SURF_AVISO_ANTES = int(cfg["aviso_antes"])
+
+    modo_cfg = cfg["surf"]
+    modo_monitor = {
+        "vermelho": "Vermelho",
+        "preto": "Preto",
+        "ambos": "Ambos",
+    }.get(modo_cfg)
+
+    if modo_monitor is None:
+        raise RuntimeError("SURF não configurado.")
+
+    with alertas_surfe_lock:
+        alertas_surfe_ativos = True
+
+    try:
+        _iniciar_monitor_alertas_surfe(modo_monitor)
+    except Exception:
+        with alertas_surfe_lock:
+            alertas_surfe_ativos = False
+        raise
+
+
+
+def _configurar_e_iniciar_monitor_gatilho(chat_id):
+    """Inicia o monitor real usando a lógica ENTRADA POR GATILHO."""
+    global ALERTAS_SURF_GATILHO, ALERTAS_SURF_STOP_GALE, ALERTAS_SURF_AVISO_ANTES
+    global ALERTAS_MODO_ESTRATEGIA, alertas_gatilho_nivel_aposta
+    global alertas_surfe_ativos
+
+    cfg = _cfg_gatilho(chat_id)
+    ALERTAS_MODO_ESTRATEGIA = "entrada_gatilho"
+    ALERTAS_SURF_GATILHO = int(cfg["gale_gatilho"])
+    ALERTAS_SURF_STOP_GALE = int(cfg["limite_gales"])
+    ALERTAS_SURF_AVISO_ANTES = int(cfg.get("aviso_antes", 2))
+    alertas_gatilho_nivel_aposta = 0
+
+    modo_monitor = {
+        "vermelho": "Vermelho",
+        "preto": "Preto",
+        "ambos": "Ambos",
+    }.get(cfg["surf"])
+    if modo_monitor is None:
+        raise RuntimeError("SURF não configurado.")
+
+    with alertas_surfe_lock:
+        alertas_surfe_ativos = True
+    try:
+        _iniciar_monitor_alertas_surfe(modo_monitor)
+    except Exception:
+        with alertas_surfe_lock:
+            alertas_surfe_ativos = False
+        raise
+
+def _parar_monitor_real():
+    """Desliga o monitor ao vivo e descarta a sessão atual."""
+    global alertas_surfe_ativos, alertas_surfe_ultima_rodada_id, alertas_surfe_modo
+    with alertas_surfe_lock:
+        alertas_surfe_ativos = False
+        alertas_surfe_ultima_rodada_id = None
+        alertas_surfe_modo = None
+    _zerar_estado_sessao_online()
+
+
+
+def _texto_sinais_offline():
+    """Texto completo exibido dentro do BOT ANALISADOR."""
+    return (
+        "📴 SINAIS OFFLINE\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🤖 BOT OFFLINE\n\n"
+        "⏸ Monitoramento interrompido.\n\n"
+        "📌 O acompanhamento atual foi encerrado.\n\n"
+        "🔄 Ao iniciar novamente, o bot começará\n"
+        "um novo monitoramento a partir da rodada\n"
+        "mais recente daquele momento.\n\n"
+        "🚫 Caminhos, Gales e sinais da execução\n"
+        "anterior não serão continuados.\n\n"
+        "🧬 Isso evita incoerências na análise dos\n"
+        "caminhos, garantindo que cada novo\n"
+        "monitoramento comece de um ponto válido\n"
+        "e acompanhe somente os novos acontecimentos."
+    )
+
+
+def _texto_canal_offline(chat_id=None):
+    """Texto curto enviado automaticamente ao CANAL DE SINAIS."""
+    chat_id = chat_id if chat_id is not None else _chat_textos_ativo()
+    if chat_id is None:
+        return _TEXTOS_CANAL_PADRAO["offline"]
+    return _render_texto_canal(chat_id, "offline")
+
+
+def _destino_canal_surf(chat_id=None):
+    """Retorna exclusivamente o canal de alertas já configurado no bot."""
+    if "ALERTAS_CHAT_ID" not in globals() or not globals()["ALERTAS_CHAT_ID"]:
+        raise RuntimeError("ALERTAS_CHAT_ID não está configurado.")
+    return globals()["ALERTAS_CHAT_ID"]
+
+
+def _enviar_canal_surf(chat_id, texto):
+    try:
+        bot.send_message(_destino_canal_surf(chat_id), texto)
+    except Exception:
+        traceback.print_exc()
+
+
+def _texto_exclusao(chat_id):
+    cfg = _cfg(chat_id)
+    aviso = "NÃO AVISAR" if cfg["aviso_antes"] == 0 else f"{cfg['aviso_antes']} Gale(s) antes"
+    return (
+        "🗑 EXCLUIR ESTRATÉGIA\n\n"
+        "⚠️ ATENÇÃO\n\n"
+        "Esta ação excluirá a configuração desta estratégia.\n\n"
+        f"🔥 Gatilho: G{cfg['gale_gatilho']}\n"
+        f"🏄 SURF: {_surf_nome(cfg['surf'])}\n"
+        f"🛡 Limite: G{cfg['limite_gales']}\n"
+        f"⚠️ Aviso: {aviso}\n\n"
+        "Depois de excluir, será necessário configurar uma nova estratégia para voltar a utilizá-la.\n\n"
+        "Deseja realmente excluir?"
+    )
+
+
+def _excluir_markup():
+    m = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m.add(telebot.types.InlineKeyboardButton(
+        "🗑 SIM, EXCLUIR",
+        callback_data="config_excluir_sim"
+    ))
+    m.add(telebot.types.InlineKeyboardButton(
+        "⬅️ NÃO, VOLTAR",
+        callback_data="config_modo_surf_normal"
+    ))
+    return m
+
+
+
+# ==============================================================================
+# INVESTIGAÇÃO — leitura detalhada dos caminhos do SURF
+# ==============================================================================
+# Esta área é somente para conferência. Ela não altera o motor do SURF,
+# os alertas, as estatísticas oficiais ou qualquer regra já existente.
+
+def _investigacao_texto_intro():
+    return "\n".join([
+        "🔎 INVESTIGAÇÃO",
+        "",
+        "Ferramenta para conferir detalhadamente os caminhos do SURF nas 2.000 rodadas.",
+        "",
+        "Escolha qual SURF deseja investigar.",
+        "O bot mostrará os registros em texto, com 1 rodada antes do G1, até o Gale escolhido + 1 rodada seguinte.",
+        "",
+        "📌 Esta ferramenta é somente para investigação e não altera nenhuma estratégia do bot.",
+        "",
+        "👇 Escolha o SURF:",
+    ])
+
+
+def _investigacao_markup_caminhos():
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🔴 SURF 2 VERMELHOS", callback_data="investigacao_caminho:Vermelho"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "⚫ SURF 2 PRETOS", callback_data="investigacao_caminho:Preto"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "⬅️ VOLTAR", callback_data="voltar_painel_principal"
+    ))
+    return markup
+
+
+def _investigacao_markup_gales(caminho_nome):
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    botoes = [
+        telebot.types.InlineKeyboardButton(
+            f"G{gale}", callback_data=f"investigacao_gale:{caminho_nome}:{gale}:0"
+        )
+        for gale in range(1, 17)
+    ]
+    for pos in range(0, len(botoes), 2):
+        markup.row(*botoes[pos:pos + 2])
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🔄 TROCAR SURF", callback_data="investigacao"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "⬅️ VOLTAR AO PAINEL", callback_data="voltar_painel_principal"
+    ))
+    return markup
+
+
+def _investigacao_cor_jogada(caminho_nome, pos_relativa):
+    """Mesma alternância de 2 em 2 usada pelo SURF oficial."""
+    bloco = ((pos_relativa - 1) // 2) % 2
+    if caminho_nome == "Vermelho":
+        return "Vermelho" if bloco == 0 else "Preto"
+    return "Preto" if bloco == 0 else "Vermelho"
+
+
+def _investigacao_montar_trecho(dados, indice_inicio, indice_g1, indice_gale_alvo, caminho_nome, gale_alvo):
+    """Monta 1 rodada antes do G1, o caminho até o Gale alvo e +1 rodada seguinte."""
+    trecho = []
+    inicio = max(indice_inicio, indice_g1 - 1)
+    fim = min(len(dados), indice_gale_alvo + 2)
+    gale = 0
+
+    for indice_abs in range(inicio, fim):
+        rodada = dados[indice_abs]
+        pos_relativa = indice_abs - indice_inicio
+        saiu = normalizar_cor_analise(rodada)
+        jogaria = _investigacao_cor_jogada(caminho_nome, pos_relativa)
+
+        if indice_abs < indice_g1:
+            resultado = "⬅️ ANTES DO G1"
+            ordem = 0
+            tipo = "antes"
+        else:
+            if saiu == jogaria:
+                gale = 0
+                resultado = "✅"
+            else:
+                gale += 1
+                resultado = f"❌ G{gale}"
+            ordem = indice_abs - indice_g1 + 1
+            tipo = "depois" if indice_abs > indice_gale_alvo else "gale"
+            if tipo == "depois":
+                resultado += f"  ⬅️ DEPOIS DO G{gale_alvo}"
+
+        data, hora = formatar_data_hora(rodada.get("instant"), rodada.get("tempo"))
+        trecho.append({
+            "ordem": ordem,
+            "numero": rodada.get("numero", "?"),
+            "saiu": saiu,
+            "jogaria": jogaria,
+            "resultado": resultado,
+            "data": data,
+            "hora": hora,
+            "tipo": tipo,
+        })
+    return trecho
+
+
+def _investigacao_encontrar(caminho_nome, gale_alvo, pagina=0, por_pagina=2):
+    """Localiza CAMINHOS ÚNICOS que alcançaram o Gale escolhido.
+
+    O cálculo do SURF continua exatamente igual ao anterior: todas as 1.999
+    posições possíveis são testadas. A única diferença é a etapa de exibição:
+    quando pontos iniciais diferentes chegam exatamente ao mesmo trecho real
+    G1 -> Gale escolhido, essa sequência é contada apenas uma vez.
+
+    A identidade do caminho usa as rodadas reais do trecho:
+    ID/horário + número + cor, do G1 até o Gale escolhido.
+
+    Para manter o bot leve, apenas os caminhos únicos da página solicitada
+    têm o desenho completo reconstruído.
+    """
+    if caminho_nome not in ("Vermelho", "Preto") or not (1 <= gale_alvo <= 16):
+        return 0, []
+
+    dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+    pagina = max(0, int(pagina))
+    primeiro = pagina * por_pagina
+    ultimo = primeiro + por_pagina
+
+    total_unicos = 0
+    encontrados = []
+    assinaturas_vistas = set()
+
+    for indice_inicio in range(max(0, len(dados) - 1)):
+        gale = 0
+        indice_g1 = None
+
+        for indice_abs in range(indice_inicio + 1, len(dados)):
+            rodada = dados[indice_abs]
+            saiu = normalizar_cor_analise(rodada)
+            if saiu not in ("Preto", "Vermelho", "Branco"):
+                continue
+
+            pos_relativa = indice_abs - indice_inicio
+            jogaria = _investigacao_cor_jogada(caminho_nome, pos_relativa)
+
+            if saiu == jogaria:
+                gale = 0
+                indice_g1 = None
+                continue
+
+            gale += 1
+            if gale == 1:
+                indice_g1 = indice_abs
+
+            if gale == gale_alvo and indice_g1 is not None:
+                assinatura = []
+                for idx_sig in range(indice_g1, indice_abs + 1):
+                    r_sig = dados[idx_sig]
+                    assinatura.append((
+                        str(r_sig.get("rodada_id") or r_sig.get("instant") or r_sig.get("tempo") or ""),
+                        str(r_sig.get("numero")),
+                        normalizar_cor_analise(r_sig),
+                    ))
+                assinatura = tuple(assinatura)
+
+                # Pontos diferentes que convergiram para o mesmo G1 -> Gale
+                # representam UM caminho único.
+                if assinatura in assinaturas_vistas:
+                    continue
+                assinaturas_vistas.add(assinatura)
+
+                if primeiro <= total_unicos < ultimo:
+                    ponto = dados[indice_inicio]
+                    data_ponto, hora_ponto = formatar_data_hora(
+                        ponto.get("instant"), ponto.get("tempo")
+                    )
+                    inicio_g1 = dados[indice_g1]
+                    data_g1, hora_g1 = formatar_data_hora(
+                        inicio_g1.get("instant"), inicio_g1.get("tempo")
+                    )
+                    trecho = _investigacao_montar_trecho(
+                        dados, indice_inicio, indice_g1, indice_abs, caminho_nome, gale_alvo
+                    )
+                    encontrados.append({
+                        "indice_inicio": indice_inicio,
+                        "ponto_numero": ponto.get("numero", "?"),
+                        "ponto_cor": normalizar_cor_analise(ponto),
+                        "ponto_data": data_ponto,
+                        "ponto_hora": hora_ponto,
+                        "g1_data": data_g1,
+                        "g1_hora": hora_g1,
+                        "trecho": trecho,
+                    })
+
+                total_unicos += 1
+
+    return total_unicos, encontrados
+
+
+def _investigacao_linha_registro(item):
+    """Linha alinhada no mesmo padrão visual usado pelo SURF."""
+    numero = str(item.get("numero", "?"))
+    saiu = item.get("saiu")
+    jogaria = item.get("jogaria")
+
+    # Figure Space mantém números de 1 e 2 dígitos ocupando a mesma largura
+    # sem usar bloco monoespaçado/cinza do Telegram.
+    numero_fmt = ("\u2007" + numero) if len(numero) == 1 else numero
+    ordem = int(item.get("ordem", 0))
+    ordem_fmt = "  " if item.get("tipo") == "antes" else f"{ordem:02d}"
+
+    return (
+        f"{ordem_fmt} {item['hora']}  "
+        f"{emoji_cor(saiu)} {numero_fmt} - {emoji_cor(jogaria)}  {item['resultado']}"
+    )
+
+
+def _investigacao_enviar_resultado(chat_id, caminho_nome, gale_alvo, pagina=0):
+    por_pagina = 2
+    total_registros, registros = _investigacao_encontrar(
+        caminho_nome, gale_alvo, pagina=pagina, por_pagina=por_pagina
+    )
+
+    emoji = "🔴" if caminho_nome == "Vermelho" else "⚫"
+    nome = "SURF 2 VERMELHOS" if caminho_nome == "Vermelho" else "SURF 2 PRETOS"
+
+    if not registros:
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton(
+            "↩️ ESCOLHER OUTRO GALE", callback_data=f"investigacao_caminho:{caminho_nome}"
+        ))
+        markup.add(telebot.types.InlineKeyboardButton(
+            "🔄 TROCAR SURF", callback_data="investigacao"
+        ))
+        bot.send_message(
+            chat_id,
+            f"🔎 INVESTIGAÇÃO — {emoji} {nome}\n\n"
+            f"🎯 Gale investigado: G{gale_alvo}\n"
+            f"📚 Base: {ANALYSIS_ROUNDS} rodadas\n\n"
+            "❌ Nenhum caminho chegou a esse Gale na janela atual.",
+            reply_markup=markup,
+        )
+        return
+
+    # Um caminho completo ocupa bastante texto. Dois por página continuam
+    # confortavelmente abaixo do limite de mensagem do Telegram.
+    total_paginas = max(1, (total_registros + por_pagina - 1) // por_pagina)
+    pagina = max(0, min(pagina, total_paginas - 1))
+    inicio_global = pagina * por_pagina
+
+    linhas = [
+        f"🔎 INVESTIGAÇÃO — {emoji} {nome}",
+        "",
+        f"🎯 Gale investigado: G{gale_alvo}",
+        f"📚 Base: {ANALYSIS_ROUNDS} rodadas",
+        f"🧬 Caminhos únicos encontrados: {total_registros}",
+        f"📄 Página: {pagina + 1}/{total_paginas}",
+        "",
+        "📌 Cada caminho único mostra 1 rodada antes do G1, o caminho até o Gale escolhido e + 1 rodada seguinte.",
+    ]
+
+    for deslocamento, reg in enumerate(registros):
+        pos_global = inicio_global + deslocamento
+        linhas += [
+            "",
+            "━━━━━━━━━━━━━━━━━━",
+            f"🧬 CAMINHO ÚNICO {pos_global + 1}/{total_registros}",
+            f"📍 Ponto inicial: {emoji_cor(reg['ponto_cor'])} {reg['ponto_numero']} • {reg['ponto_data']} {reg['ponto_hora']}",
+            f"▶️ G1 começou: {reg['g1_data']} {reg['g1_hora']}",
+            "",
+        ]
+        linhas.extend(_investigacao_linha_registro(item) for item in reg["trecho"])
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    nav = []
+    if pagina > 0:
+        nav.append(telebot.types.InlineKeyboardButton(
+            "⬅️ ANTERIOR", callback_data=f"investigacao_gale:{caminho_nome}:{gale_alvo}:{pagina - 1}"
+        ))
+    if pagina + 1 < total_paginas:
+        nav.append(telebot.types.InlineKeyboardButton(
+            "PRÓXIMA ➡️", callback_data=f"investigacao_gale:{caminho_nome}:{gale_alvo}:{pagina + 1}"
+        ))
+    if nav:
+        markup.row(*nav)
+    markup.add(telebot.types.InlineKeyboardButton(
+        "↩️ ESCOLHER OUTRO GALE", callback_data=f"investigacao_caminho:{caminho_nome}"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🔄 TROCAR SURF", callback_data="investigacao"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "⬅️ VOLTAR AO PAINEL", callback_data="voltar_painel_principal"
+    ))
+    bot.send_message(chat_id, "\n".join(linhas), reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "investigacao")
+def investigacao_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            call.message.chat.id,
+            _investigacao_texto_intro(),
+            reply_markup=_investigacao_markup_caminhos(),
+        )
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro na investigação: {type(erro).__name__}: {str(erro)[:250]}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("investigacao_caminho:"))
+def investigacao_caminho_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        caminho_nome = call.data.split(":", 1)[1]
+        emoji = "🔴" if caminho_nome == "Vermelho" else "⚫"
+        nome = "SURF 2 VERMELHOS" if caminho_nome == "Vermelho" else "SURF 2 PRETOS"
+        bot.send_message(
+            call.message.chat.id,
+            f"🔎 INVESTIGAÇÃO — {emoji} {nome}\n\n"
+            "Escolha qual Gale deseja investigar.\n\n"
+            "O bot localizará os caminhos únicos em que esse Gale foi alcançado e mostrará cada sequência real diferente em texto.",
+            reply_markup=_investigacao_markup_gales(caminho_nome),
+        )
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro ao escolher o SURF: {type(erro).__name__}: {str(erro)[:250]}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("investigacao_gale:"))
+def investigacao_gale_callback(call):
+    try:
+        bot.answer_callback_query(call.id, "Calculando investigação...")
+        _, caminho_nome, gale_txt, pagina_txt = call.data.split(":", 3)
+        _investigacao_enviar_resultado(
+            call.message.chat.id,
+            caminho_nome,
+            int(gale_txt),
+            int(pagina_txt),
+        )
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro ao calcular a investigação: {type(erro).__name__}: {str(erro)[:250]}")
+
+
+def _controle_geral_assinatura_trecho(dados, indice_g1, indice_gale):
+    """Assinatura de uma ocorrência real: horário + número + cor do G1 até o Gale."""
+    assinatura = []
+    for idx in range(indice_g1, indice_gale + 1):
+        rodada = dados[idx]
+        assinatura.append((
+            str(rodada.get("instant") or rodada.get("tempo") or ""),
+            str(rodada.get("numero")),
+            normalizar_cor_analise(rodada),
+        ))
+    return tuple(assinatura)
+
+
+def _controle_geral_montar_trecho_unico(dados, indice_inicio, indice_g1, indice_gale, caminho_nome, gale):
+    """Reaproveita exatamente o desenho da Investigação."""
+    return _investigacao_montar_trecho(
+        dados,
+        indice_inicio,
+        indice_g1,
+        indice_gale,
+        caminho_nome,
+        gale,
+    )
+
+
+def _controle_geral_surfe_analisar_estrategia(caminho_nome):
+    """Analisa todos os pontos e agrupa convergências em CAMINHOS ÚNICOS.
+
+    Cada ponto inicial continua sendo testado separadamente.
+    Porém, se pontos diferentes terminarem no mesmo trecho real G1 -> maior Gale
+    (mesmos números/cores/horários), eles pertencem ao mesmo caminho único.
+    """
+    if caminho_nome not in ("Vermelho", "Preto"):
+        return None
+
+    dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+    if len(dados) < 2:
+        return {
+            "caminho": caminho_nome,
+            "total_rodadas": len(dados),
+            "total_pontos": 0,
+            "distribuicao": {},
+            "grupos": {},
+        }
+
+    # Por Gale:
+    # bruto = quantidade de pontos de início cujo MAIOR Gale foi aquele.
+    # grupos = ocorrências reais únicas, agrupadas pela sequência G1 -> Gale.
+    distribuicao = {}
+    grupos_por_gale = {}
+
+    for indice_inicio in range(len(dados) - 1):
+        gale_atual = 0
+        indice_g1_atual = None
+
+        maior_gale = 0
+        maior_indice_g1 = None
+        maior_indice_gale = None
+
+        for pos_relativa, rodada in enumerate(dados[indice_inicio + 1:], 1):
+            indice_abs = indice_inicio + pos_relativa
+            saiu = normalizar_cor_analise(rodada)
+            jogaria = _investigacao_cor_jogada(caminho_nome, pos_relativa)
+
+            if saiu == jogaria:
+                gale_atual = 0
+                indice_g1_atual = None
+                continue
+
+            gale_atual += 1
+            if gale_atual == 1:
+                indice_g1_atual = indice_abs
+
+            if gale_atual > maior_gale:
+                maior_gale = gale_atual
+                maior_indice_g1 = indice_g1_atual
+                maior_indice_gale = indice_abs
+
+        if maior_gale <= 0 or maior_indice_g1 is None or maior_indice_gale is None:
+            continue
+
+        distribuicao[maior_gale] = distribuicao.get(maior_gale, 0) + 1
+
+        assinatura = _controle_geral_assinatura_trecho(
+            dados, maior_indice_g1, maior_indice_gale
+        )
+
+        grupos_gale = grupos_por_gale.setdefault(maior_gale, {})
+        grupo = grupos_gale.get(assinatura)
+
+        ponto = dados[indice_inicio]
+        data_ponto, hora_ponto = formatar_data_hora(
+            ponto.get("instant"), ponto.get("tempo")
+        )
+        g1 = dados[maior_indice_g1]
+        data_g1, hora_g1 = formatar_data_hora(g1.get("instant"), g1.get("tempo"))
+
+        if grupo is None:
+            grupos_gale[assinatura] = {
+                "indice_inicio": indice_inicio,
+                "indice_g1": maior_indice_g1,
+                "indice_gale": maior_indice_gale,
+                "ponto_numero": ponto.get("numero", "?"),
+                "ponto_cor": normalizar_cor_analise(ponto),
+                "ponto_data": data_ponto,
+                "ponto_hora": hora_ponto,
+                "g1_data": data_g1,
+                "g1_hora": hora_g1,
+                "quantidade_convergente": 1,
+                "trecho": _controle_geral_montar_trecho_unico(
+                    dados,
+                    indice_inicio,
+                    maior_indice_g1,
+                    maior_indice_gale,
+                    caminho_nome,
+                    maior_gale,
+                ),
+            }
+        else:
+            grupo["quantidade_convergente"] += 1
+
+    grupos = {}
+    resumo = {}
+    for gale, bruto in distribuicao.items():
+        unicos = list((grupos_por_gale.get(gale) or {}).values())
+        convergentes = max(0, bruto - len(unicos))
+        grupos[gale] = unicos
+        resumo[gale] = {
+            "brutos": bruto,
+            "unicos": len(unicos),
+            "convergentes": convergentes,
+        }
+
+    return {
+        "caminho": caminho_nome,
+        "total_rodadas": len(dados),
+        "total_pontos": max(0, len(dados) - 1),
+        "distribuicao": distribuicao,
+        "resumo": resumo,
+        "grupos": grupos,
+    }
+
+
+def _controle_geral_surfe_texto_intro():
+    return "\n".join([
+        "🐺 CONTROLE GERAL — SURF",
+        "",
+        "📊 Ferramenta para investigar o comportamento dos Gales nas 2.000 rodadas mais recentes.",
+        "",
+        "📍 O ponto inicial pode estar relacionado a:\n\n⚪ Após BRANCO\n🔴 Após VERMELHO\n⚫ Após PRETO\n\n🔎 O sistema testa cada posição possível como ponto inicial dos caminhos do SURF 🔴 e SURF ⚫.",
+        "",
+        "🧬 CAMINHOS ÚNICOS",
+        "",
+        "Quando vários pontos iniciais chegam exatamente à mesma sequência real de rodadas, eles são agrupados como uma única ocorrência.",
+        "",
+        "🔁 Caminhos repetidos/convergentes não aumentam artificialmente a quantidade de Gales encontrados.",
+        "",
+        "🎯 Para diferenciar uma ocorrência da outra, o bot compara as rodadas reais do Gale: números, cores e horários.",
+        "",
+        "📌 Ao escolher um Gale, o bot mostra:",
+        "📊 Registros brutos",
+        "🧬 Caminhos únicos",
+        "🔁 Caminhos convergentes",
+        "",
+        "👇 Depois aparecem somente os desenhos dos caminhos realmente diferentes.",
+        "",
+        "👇 Escolha o tipo de análise:",
+    ])
+
+
+def _controle_geral_surfe_markup_estrategias():
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    markup.add(telebot.types.InlineKeyboardButton("🧬 CAMINHOS ÚNICOS", callback_data="cg_menu_caminhos"))
+    markup.add(telebot.types.InlineKeyboardButton("📊 SEQUÊNCIAS DE GALE", callback_data="cg_menu_sequencias"))
+    return markup
+
+def _controle_geral_surfe_enviar_distribuicao(chat_id, caminho_nome):
+    resultado = _controle_geral_surfe_analisar_estrategia(caminho_nome)
+    if not resultado or not resultado.get("distribuicao"):
+        bot.send_message(chat_id, "❌ Não encontrei Gales suficientes para montar esta análise.")
+        return
+
+    cache_chat = controle_geral_surfe_cache.setdefault(chat_id, {})
+    cache_chat[caminho_nome] = resultado
+    emoji = "🔴" if caminho_nome == "Vermelho" else "⚫"
+    nome = "SURF 2 VERMELHOS" if caminho_nome == "Vermelho" else "SURF 2 PRETOS"
+
+    linhas = [
+        f"🧬 CAMINHOS ÚNICOS — {emoji} {nome}",
+        "",
+        f"📚 Rodadas analisadas: {resultado['total_rodadas']:,}".replace(",", "."),
+        f"📍 Pontos de início testados: {resultado['total_pontos']:,}".replace(",", "."),
+        "",
+        "📌 Os valores abaixo já separam ocorrências reais de caminhos que apenas convergiram para a mesma sequência.",
+        "",
+    ]
+
+    gales_ordenados = sorted(resultado["resumo"])
+    largura_gale = max(len(str(g)) for g in gales_ordenados)
+    largura_unico = max(len(str(resultado["resumo"][g]["unicos"])) for g in gales_ordenados)
+    largura_bruto = max(len(str(resultado["resumo"][g]["brutos"])) for g in gales_ordenados)
+
+    # U+2007 = espaço numérico: ocupa a mesma largura visual de um algarismo.
+    # Assim o espaço fica ANTES do número e as colunas terminam no mesmo ponto.
+    ESPACO_NUMERICO = "\u2007"
+
+    for gale in gales_ordenados:
+        info = resultado["resumo"][gale]
+
+        gale_str = str(gale)
+        unico_str = str(info["unicos"])
+        bruto_str = str(info["brutos"])
+
+        gale_txt = (ESPACO_NUMERICO * (largura_gale - len(gale_str))) + gale_str
+        unico_txt = (ESPACO_NUMERICO * (largura_unico - len(unico_str))) + unico_str
+        bruto_txt = bruto_str + (ESPACO_NUMERICO * (largura_bruto - len(bruto_str)))
+
+        linhas.append(
+            f"🔥 G{gale_txt} — 🧬 {unico_txt} único(s) • 📊 {bruto_txt} bruto(s)"
+        )
+
+    linhas += ["", "👇 Escolha um Gale para ver os caminhos únicos:"]
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    botoes = []
+    for gale in sorted(resultado["resumo"]):
+        info = resultado["resumo"][gale]
+        botoes.append(telebot.types.InlineKeyboardButton(
+            f"🔥 G{gale} — 🧬 {info['unicos']}",
+            callback_data=f"cg_surfe_gale:{caminho_nome}:{gale}:0"
+        ))
+    for pos in range(0, len(botoes), 2):
+        markup.row(*botoes[pos:pos + 2])
+
+    markup.add(telebot.types.InlineKeyboardButton(
+        "⬆️ 📖 ENTENDER A ANÁLISE ⬆️", callback_data=f"cg_surfe_entender:{caminho_nome}"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🔄 TROCAR ESTRATÉGIA", callback_data="cg_menu_caminhos"
+    ))
+
+    bot.send_message(chat_id, "\n".join(linhas), reply_markup=markup)
+
+
+
+def _controle_geral_surfe_sequencias(caminho_nome):
+    """Conta todas as sequências (bruto) e também as ocorrências reais únicas."""
+    if caminho_nome not in ("Vermelho", "Preto"):
+        return None
+    dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+    distribuicao = {}
+    assinaturas_por_gale = {}
+    total_sequencias = 0
+    for indice_inicio in range(max(0, len(dados) - 1)):
+        gale_atual = 0
+        indice_g1 = None
+        for pos_relativa, rodada in enumerate(dados[indice_inicio + 1:], 1):
+            indice_abs = indice_inicio + pos_relativa
+            saiu = normalizar_cor_analise(rodada)
+            bloco = ((pos_relativa - 1) // 2) % 2
+            if caminho_nome == "Vermelho":
+                jogaria = "Vermelho" if bloco == 0 else "Preto"
+            else:
+                jogaria = "Preto" if bloco == 0 else "Vermelho"
+            if saiu == jogaria:
+                if gale_atual > 0:
+                    distribuicao[gale_atual] = distribuicao.get(gale_atual, 0) + 1
+                    total_sequencias += 1
+                    assinatura = _controle_geral_assinatura_trecho(dados, indice_g1, indice_abs - 1)
+                    assinaturas_por_gale.setdefault(gale_atual, set()).add(assinatura)
+                    gale_atual = 0
+                    indice_g1 = None
+            else:
+                gale_atual += 1
+                if gale_atual == 1:
+                    indice_g1 = indice_abs
+        if gale_atual > 0:
+            distribuicao[gale_atual] = distribuicao.get(gale_atual, 0) + 1
+            total_sequencias += 1
+            assinatura = _controle_geral_assinatura_trecho(dados, indice_g1, len(dados) - 1)
+            assinaturas_por_gale.setdefault(gale_atual, set()).add(assinatura)
+    unicos = {g: len(v) for g, v in assinaturas_por_gale.items()}
+    return {
+        "caminho": caminho_nome, "total_rodadas": len(dados),
+        "total_pontos": max(0, len(dados) - 1), "total_sequencias": total_sequencias,
+        "distribuicao": distribuicao, "unicos": unicos,
+    }
+
+def _controle_geral_surfe_enviar_sequencias(chat_id, caminho_nome):
+    resultado = _controle_geral_surfe_sequencias(caminho_nome)
+    if not resultado or not resultado.get("distribuicao"):
+        bot.send_message(chat_id, "❌ Não encontrei sequências de Gale nesta análise.")
+        return
+    emoji = "🔴" if caminho_nome == "Vermelho" else "⚫"
+    nome = "SURF 2 VERMELHOS" if caminho_nome == "Vermelho" else "SURF 2 PRETOS"
+    linhas = [
+        f"📊 SEQUÊNCIAS DE GALE — {emoji} {nome}", "",
+        "📌 CONTAGEM BRUTA",
+        "Mantém todas as sequências, inclusive as repetidas/convergentes.",
+        "",
+        "🧬 CAMINHOS ÚNICOS",
+        "Mostra quantas sequências reais diferentes aconteceram.",
+        "",
+    ]
+    gales = sorted(resultado["distribuicao"])
+    fmt = lambda n: f"{n:,}".replace(",", ".")
+    largura_gale = max(len(str(g)) for g in gales)
+
+    # Alinhamento visual no Telegram:
+    # - U+2007 FIGURE SPACE ocupa a largura de um algarismo.
+    # - U+2008 PUNCTUATION SPACE ocupa a largura de pontuação.
+    #
+    # Isso corrige o caso em que "1.142" tem 4 dígitos + 1 ponto,
+    # enquanto "624" tem 3 dígitos e nenhum ponto.
+    ESPACO_NUMERICO = "\u2007"
+    ESPACO_PONTUACAO = "\u2008"
+
+    maior_digitos_unico = max(
+        sum(ch.isdigit() for ch in fmt(resultado["unicos"].get(g, 0)))
+        for g in gales
+    )
+    maior_pontos_unico = max(
+        fmt(resultado["unicos"].get(g, 0)).count(".")
+        for g in gales
+    )
+
+    maior_digitos_bruto = max(
+        sum(ch.isdigit() for ch in fmt(resultado["distribuicao"][g]))
+        for g in gales
+    )
+    maior_pontos_bruto = max(
+        fmt(resultado["distribuicao"][g]).count(".")
+        for g in gales
+    )
+
+    for gale in gales:
+        gale_str = str(gale)
+        bruto_str = fmt(resultado["distribuicao"][gale])
+        unico_str = fmt(resultado["unicos"].get(gale, 0))
+
+        gtxt = (ESPACO_NUMERICO * (largura_gale - len(gale_str))) + gale_str
+
+        digitos_unico = sum(ch.isdigit() for ch in unico_str)
+        pontos_unico = unico_str.count(".")
+        digitos_bruto = sum(ch.isdigit() for ch in bruto_str)
+        pontos_bruto = bruto_str.count(".")
+
+        # O número continua colado ao emoji.
+        # A compensação entra DEPOIS do número, respeitando separadamente
+        # a largura dos algarismos e dos pontos de milhar.
+        unico = (
+            unico_str
+            + (ESPACO_NUMERICO * (maior_digitos_unico - digitos_unico))
+            + (ESPACO_PONTUACAO * (maior_pontos_unico - pontos_unico))
+        )
+        bruto = (
+            bruto_str
+            + (ESPACO_NUMERICO * (maior_digitos_bruto - digitos_bruto))
+            + (ESPACO_PONTUACAO * (maior_pontos_bruto - pontos_bruto))
+        )
+
+        linhas.append(f"🔥 G{gtxt} — 🧬 {unico} • 📌 {bruto}")
+    linhas += ["", f"📌 Total bruto: {fmt(resultado['total_sequencias'])}",
+               f"🧬 Total de sequências únicas: {fmt(sum(resultado['unicos'].values()))}"]
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    markup.add(telebot.types.InlineKeyboardButton("⬆️ 📖 ENTENDER A ANÁLISE ⬆️", callback_data=f"cg_surfe_entender_seq:{caminho_nome}"))
+    markup.add(telebot.types.InlineKeyboardButton("🔄 TROCAR ESTRATÉGIA", callback_data="cg_menu_sequencias"))
+    markup.add(telebot.types.InlineKeyboardButton("🐺 CONTROLE GERAL", callback_data="controle_geral_surfe"))
+    bot.send_message(chat_id, "\n".join(linhas), reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cg_surfe_sequencias:"))
+def controle_geral_surfe_sequencias_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        caminho_nome = call.data.split(":", 1)[1]
+        _controle_geral_surfe_enviar_sequencias(call.message.chat.id, caminho_nome)
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro nas sequências de Gale: {type(erro).__name__}: {str(erro)[:250]}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cg_surfe_entender_seq:"))
+def controle_geral_surfe_entender_sequencias_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        caminho_nome = call.data.split(":", 1)[1]
+        emoji = "🔴" if caminho_nome == "Vermelho" else "⚫"
+        nome = "SURF 2 VERMELHOS" if caminho_nome == "Vermelho" else "SURF 2 PRETOS"
+        texto = "\n".join([
+            "📖 ENTENDER A ANÁLISE", "", f"🎯 Estratégia: {emoji} {nome}", "",
+            "📊 Aqui são contadas as sequências de Gale, e não apenas o pior Gale do caminho.", "",
+            "💡 EXEMPLO", "G1 → G3 → G2 → G5 → G1 → G8 → G4 → G2", "",
+            "Cada sequência é contabilizada no Gale em que terminou. Quando ocorre um acerto, a contagem zera e começa uma nova sequência.",
+        ])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton(
+            "🔽 FECHAR EXPLICAÇÃO", callback_data=f"cg_surfe_sequencias:{caminho_nome}"
+        ))
+        bot.send_message(call.message.chat.id, texto, reply_markup=markup)
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro ao abrir a explicação: {type(erro).__name__}: {str(erro)[:250]}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cg_surfe_entender:"))
+def controle_geral_surfe_entender_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        caminho_nome = call.data.split(":", 1)[1]
+        emoji = "🔴" if caminho_nome == "Vermelho" else "⚫"
+        nome = "SURF 2 VERMELHOS" if caminho_nome == "Vermelho" else "SURF 2 PRETOS"
+        texto = "\n".join([
+            "📖 ENTENDER A ANÁLISE",
+            "",
+            f"🎯 Estratégia: {emoji} {nome}",
+            "",
+            "📊 Cada rodada pode ser usada como ponto inicial. O SURF começa na rodada seguinte e segue até a mais recente.",
+            "",
+            "🔥 Para cada ponto, fica registrado somente o pior Gale daquele caminho.",
+            "",
+            "💡 EXEMPLO",
+            "🔴 Número 7 — 14:32:15",
+            "G1 → G3 → G2 → G5 → G1 → G8 → G4 → G2",
+            "",
+            "🔥 O pior foi G8. Portanto, esse ponto é contabilizado uma vez em G8.",
+            "",
+            "📍 Depois você pode abrir exatamente esse SURF pelo número, cor, data e horário.",
+        ])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton(
+            "🔽 FECHAR EXPLICAÇÃO", callback_data=f"cg_surfe_estrategia:{caminho_nome}"
+        ))
+        bot.send_message(call.message.chat.id, texto, reply_markup=markup)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao abrir a explicação: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+def _controle_geral_surfe_enviar_ocorrencias(chat_id, caminho_nome, gale, pagina=0):
+    cache_chat = controle_geral_surfe_cache.get(chat_id) or {}
+    resultado = cache_chat.get(caminho_nome) or {}
+    caminhos = (resultado.get("grupos") or {}).get(gale, [])
+    info = (resultado.get("resumo") or {}).get(gale)
+
+    if not caminhos or not info:
+        bot.send_message(chat_id, "❌ Essa análise expirou. Abra o Controle Geral novamente.")
+        return
+
+    por_pagina = 2
+    total_paginas = max(1, (len(caminhos) + por_pagina - 1) // por_pagina)
+    pagina = max(0, min(int(pagina), total_paginas - 1))
+    inicio = pagina * por_pagina
+    fim = min(inicio + por_pagina, len(caminhos))
+    itens = caminhos[inicio:fim]
+
+    emoji_caminho = "🔴" if caminho_nome == "Vermelho" else "⚫"
+    nome_caminho = "SURF 2 VERMELHOS" if caminho_nome == "Vermelho" else "SURF 2 PRETOS"
+
+    linhas = [
+        f"🔥 GALE {gale} — {emoji_caminho} {nome_caminho}",
+        "",
+        f"📊 Registros brutos: {info['brutos']}",
+        f"🧬 Caminhos únicos: {info['unicos']}",
+        f"🔁 Caminhos convergentes: {info['convergentes']}",
+        "",
+        "📌 Registros que chegaram à mesma sequência real de rodadas são agrupados.",
+        "👇 Abaixo aparecem somente os caminhos realmente diferentes.",
+        f"📄 Página: {pagina + 1}/{total_paginas}",
+    ]
+
+    for deslocamento, reg in enumerate(itens):
+        pos_global = inicio + deslocamento
+        linhas += [
+            "",
+            "━━━━━━━━━━━━━━━━━━",
+            f"🧬 CAMINHO ÚNICO {pos_global + 1}/{len(caminhos)}",
+            f"🔁 Pontos que convergiram neste caminho: {reg.get('quantidade_convergente', 1)}",
+            f"▶️ G1 começou: {reg['g1_data']} {reg['g1_hora']}",
+            "",
+        ]
+        linhas.extend(_investigacao_linha_registro(item) for item in reg["trecho"])
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    nav = []
+    if pagina > 0:
+        nav.append(telebot.types.InlineKeyboardButton(
+            "⬅️ ANTERIOR",
+            callback_data=f"cg_surfe_gale:{caminho_nome}:{gale}:{pagina - 1}"
+        ))
+    if pagina + 1 < total_paginas:
+        nav.append(telebot.types.InlineKeyboardButton(
+            "PRÓXIMA ➡️",
+            callback_data=f"cg_surfe_gale:{caminho_nome}:{gale}:{pagina + 1}"
+        ))
+    if nav:
+        markup.row(*nav)
+
+    markup.add(telebot.types.InlineKeyboardButton(
+        "↩️ VOLTAR AOS GALES", callback_data=f"cg_surfe_estrategia:{caminho_nome}"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🔄 TROCAR ESTRATÉGIA", callback_data="controle_geral_surfe"
+    ))
+
+    bot.send_message(chat_id, "\n".join(linhas), reply_markup=markup)
+
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cg_menu_caminhos")
+def controle_geral_menu_caminhos_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        texto = "🧬 CAMINHOS ÚNICOS\n\n📌 Agrupa pontos que chegaram à mesma sequência real e mostra somente os caminhos realmente diferentes.\n\n👇 Escolha a estratégia:"
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("🔴 SURF 2 VERMELHOS", callback_data="cg_surfe_estrategia:Vermelho"))
+        markup.add(telebot.types.InlineKeyboardButton("⚫ SURF 2 PRETOS", callback_data="cg_surfe_estrategia:Preto"))
+        markup.add(telebot.types.InlineKeyboardButton("🐺 CONTROLE GERAL", callback_data="controle_geral_surfe"))
+        bot.send_message(call.message.chat.id, texto, reply_markup=markup)
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro: {type(erro).__name__}: {str(erro)[:250]}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cg_menu_sequencias")
+def controle_geral_menu_sequencias_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        texto = "📊 SEQUÊNCIAS DE GALE\n\n📌 Mantém a contagem completa/bruta, inclusive repetições, e também calcula quantas sequências são realmente únicas.\n\n👇 Escolha a estratégia:"
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("🔴 SURF 2 VERMELHOS", callback_data="cg_surfe_sequencias:Vermelho"))
+        markup.add(telebot.types.InlineKeyboardButton("⚫ SURF 2 PRETOS", callback_data="cg_surfe_sequencias:Preto"))
+        markup.add(telebot.types.InlineKeyboardButton("🐺 CONTROLE GERAL", callback_data="controle_geral_surfe"))
+        bot.send_message(call.message.chat.id, texto, reply_markup=markup)
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro: {type(erro).__name__}: {str(erro)[:250]}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "controle_geral_surfe")
+def controle_geral_surfe_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            call.message.chat.id,
+            _controle_geral_surfe_texto_intro(),
+            reply_markup=_controle_geral_surfe_markup_estrategias(),
+        )
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro no Controle Geral: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cg_surfe_estrategia:"))
+def controle_geral_surfe_estrategia_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        caminho_nome = call.data.split(":", 1)[1]
+        _controle_geral_surfe_enviar_distribuicao(call.message.chat.id, caminho_nome)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro na análise geral: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cg_surfe_gale:"))
+def controle_geral_surfe_gale_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        _, caminho_nome, gale_txt, pagina_txt = call.data.split(":", 3)
+        _controle_geral_surfe_enviar_ocorrencias(
+            call.message.chat.id, caminho_nome, int(gale_txt), int(pagina_txt)
+        )
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao abrir o Gale: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cg_surfe_ocorrencia:"))
+def controle_geral_surfe_ocorrencia_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        _, caminho_nome, gale_txt, pos_txt = call.data.split(":", 3)
+        gale = int(gale_txt)
+        pos = int(pos_txt)
+        cache_chat = controle_geral_surfe_cache.get(call.message.chat.id) or {}
+        resultado = cache_chat.get(caminho_nome) or {}
+        ocorrencias = (resultado.get("ocorrencias") or {}).get(gale, [])
+        if pos < 0 or pos >= len(ocorrencias):
+            bot.send_message(call.message.chat.id, "❌ Essa ocorrência não está mais disponível. Abra a análise novamente.")
+            return
+
+        item = ocorrencias[pos]
+        caminho_nome = resultado.get("caminho")
+        emoji_caminho = "🔴" if caminho_nome == "Vermelho" else "⚫"
+        nome_caminho = "SURF 2 VERMELHOS" if caminho_nome == "Vermelho" else "SURF 2 PRETOS"
+        numero_txt = "0" if item.get("numero") is None else str(item.get("numero"))
+
+        texto = "\n".join([
+            f"🔥 G{gale} — PONTO DE INÍCIO",
+            "",
+            f"🎯 Estratégia: {emoji_caminho} {nome_caminho}",
+            "",
+            "📍 PONTO DE INÍCIO",
+            f"🎨 Cor: {item['emoji']} {str(item['cor']).upper()}",
+            f"🔢 Número: {numero_txt}",
+            f"📅 Data: {item['data']}",
+            f"🕐 Horário: {item['hora']}",
+            f"📍 Rodada: {item['rodada']}",
+            "",
+            f"🔥 Maior Gale deste caminho: G{gale}",
+            "",
+            "🎯 Este é o registro exato usado como início desta ocorrência.",
+        ])
+
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton(
+            "👁️ ABRIR ESTE SURF", callback_data=f"cg_surfe_abrir:{item['indice']}"
+        ))
+        markup.add(telebot.types.InlineKeyboardButton(
+            f"↩️ VOLTAR AO G{gale}", callback_data=f"cg_surfe_gale:{caminho_nome}:{gale}:{pos // 12}"
+        ))
+        bot.send_message(call.message.chat.id, texto, reply_markup=markup)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao abrir a ocorrência: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cg_surfe_abrir:"))
+def controle_geral_surfe_abrir_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        indice = int(call.data.split(":", 1)[1])
+        _abrir_ponto_surfe(call.message.chat.id, indice)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao abrir o SURF: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+# ==============================================================================
+# TELEGRAM
+# ==============================================================================
+
+@bot.message_handler(commands=["start"])
+def iniciar(message):
+    print("COMANDO /START RECEBIDO")
+    # IMPORTANTE: /start não consulta PostgreSQL/Supabase nem a API.
+    # Isso evita que uma conexão lenta com o banco atrase a entrega do painel.
+    bot.reply_to(
+        message,
+        "🤖 Bot online!\n\n"
+        "📊 Painel de controle pronto.\n"
+        "💾 Base de análise: 2.000 rodadas disponíveis mais recentes\n\n"
+        "Escolha uma análise no painel ou envie uma pergunta.",
+        reply_markup=painel_markup()
+    )
+
+
+@bot.message_handler(commands=["atualizar"])
+def atualizar_manual(message):
+    try:
+        total = atualizar_historico_tipminer(forcar=True)
+        bot.reply_to(
+            message,
+            f"✅ Histórico atualizado com sucesso.\n\n"
+            f"📚 Base fixa: {total:,} rodadas."
+        )
+    except Exception as erro:
+        bot.reply_to(
+            message,
+            f"❌ Falha ao atualizar o histórico.\n"
+            f"Erro: {type(erro).__name__}: {str(erro)[:250]}"
+        )
+
+
+@bot.message_handler(commands=["painel"])
+def abrir_painel(message):
+    try:
+        # O painel também usa o banco local para abrir imediatamente.
+        total = contar_rodadas_banco()
+
+        bot.reply_to(
+            message,
+            f"🎯 PAINEL DE ESTRATÉGIAS\n\n"
+            f"🔥 SEQUÊNCIA CORES IGUAIS 10X\n"
+            f"📊 SEQUÊNCIA DE CORES IGUAIS\n"
+            f"📚 Rodadas na base fixa: {total}\n"
+            f"💾 Base fixa de análise: {ANALYSIS_ROUNDS:,} rodadas\n\n"
+            "Clique na estratégia para gerar o resultado:",
+            reply_markup=painel_markup()
+        )
+    except Exception as erro:
+        bot.reply_to(message, f"❌ Não consegui abrir o painel: {type(erro).__name__}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("surfe_ocultar",))
+def surfe_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        ids = surfe_mensagens_abertas.pop(chat_id, [])
+        surfe_cache.pop(chat_id, None)
+        for message_id in ids:
+            try:
+                bot.delete_message(chat_id, message_id)
+            except Exception:
+                pass
+    except Exception as erro:
+        traceback.print_exc()
+
+
+def _abrir_ponto_surfe(chat_id, indice):
+    """Abre a escolha de quantidade para qualquer ponto inicial do SURF."""
+    dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+    if indice < 0 or indice >= len(dados):
+        bot.send_message(chat_id, "❌ Não foi possível localizar o registro escolhido no histórico.")
+        return
+
+    rodada = dados[indice]
+    cor = normalizar_cor_analise(rodada)
+    numero = rodada.get("numero")
+    emoji = emoji_cor(cor)
+    _, hora = formatar_data_hora(rodada.get("instant"), rodada.get("tempo"))
+
+    estado = {
+        "branco_index": indice,  # compatibilidade com o motor existente
+        "ponto_index": indice,
+        "ponto_cor": cor,
+        "ponto_numero": numero,
+        "ponto_tipo": "Branco" if cor == "Branco" else "Numero",
+    }
+    surfe_cache[chat_id] = estado
+
+    if cor == "Branco":
+        titulo_ponto = "⚪ BRANCO SELECIONADO"
+        apos = "esse Branco"
+    else:
+        titulo_ponto = f"{emoji} NÚMERO {numero} SELECIONADO"
+        apos = "esse número"
+
+    explicacao = "\n".join([
+        "🏄 SURFE — ANÁLISE ESTATÍSTICA",
+        "",
+        titulo_ponto,
+        f"🕐 {hora}",
+        "",
+        "📊 ESCOLHA AS RODADAS",
+        "",
+        f"Selecione quantas rodadas após {apos}",
+        "você deseja analisar no SURF.",
+        "",
+        "🔴 SURF 2 VERMELHOS",
+        "⚫ SURF 2 PRETOS",
+        "",
+        "📚 Escolha uma quantidade ou analise todas as rodadas disponíveis após o ponto.",
+        "",
+        "👇 Escolha uma quantidade:",
+    ])
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=3)
+    quantidades = (50, 99, 200, 300, 400, 500, 600, 700, 800, 900, 999)
+    botoes = [
+        telebot.types.InlineKeyboardButton(str(qtd), callback_data=f"surfe_qtd:{qtd}")
+        for qtd in quantidades
+    ]
+    for pos in range(0, len(botoes), 3):
+        markup.row(*botoes[pos:pos + 3])
+    markup.add(
+        telebot.types.InlineKeyboardButton("♾️ TODAS", callback_data="surfe_qtd:todas")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar")
+    )
+    m = bot.send_message(chat_id, explicacao, reply_markup=markup)
+    surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_branco:"))
+def surfe_branco_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        indice = int(call.data.split(":", 1)[1])
+        dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+        if indice < 0 or indice >= len(dados) or normalizar_cor_analise(dados[indice]) != "Branco":
+            bot.send_message(call.message.chat.id, "❌ Não foi possível localizar o Branco escolhido no histórico.")
+            return
+        _abrir_ponto_surfe(call.message.chat.id, indice)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro no SURF: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_ponto:"))
+def surfe_ponto_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        _, indice_txt, numero_txt = call.data.split(":", 2)
+        indice = int(indice_txt)
+        numero = int(numero_txt)
+        dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+        if indice < 0 or indice >= len(dados) or int(dados[indice].get("numero")) != numero:
+            bot.send_message(call.message.chat.id, "❌ Não foi possível localizar esse número no histórico.")
+            return
+        _abrir_ponto_surfe(call.message.chat.id, indice)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao abrir o registro: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_qtd:"))
+def surfe_quantidade_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        if estado.get("branco_index") is None:
+            bot.send_message(chat_id, "❌ Escolha primeiro um ponto para iniciar o SURF.")
+            return
+
+        escolha_quantidade = call.data.split(":", 1)[1]
+        if escolha_quantidade == "todas":
+            analise_total = analisar_surfe_a_partir_do_branco(
+                estado["branco_index"], limite=ANALYSIS_ROUNDS
+            )
+            if not analise_total:
+                bot.send_message(chat_id, "❌ Não foi possível recuperar o ponto inicial.")
+                return
+            total_disponivel_todas = len(analise_total["registros"])
+            if total_disponivel_todas <= 0:
+                bot.send_message(chat_id, "❌ Não existem rodadas após esse ponto inicial.")
+                return
+
+            # ♾️ TODAS não despeja todo o histórico de uma vez.
+            # Abre primeiro até 999 rodadas e, se houver mais, reutiliza o fluxo
+            # ➕ VER MAIS 500. Cada lote de 500 é enviado em blocos naturais
+            # de 100 rodadas pelo _montar_blocos_surfe().
+            quantidade = min(999, total_disponivel_todas)
+            estado["modo_todas"] = True
+        else:
+            quantidade = int(escolha_quantidade)
+            if quantidade not in (50, 99, 200, 300, 400, 500, 600, 700, 800, 900, 999):
+                return
+            estado["modo_todas"] = False
+
+        estado["quantidade"] = quantidade
+        surfe_cache[chat_id] = estado
+
+        # Confirma o recorte escolhido. Em ♾️ TODAS, abre primeiro até 999
+        # e permite continuar no mesmo ponto em lotes de +500.
+        analise = analisar_surfe_a_partir_do_branco(estado["branco_index"], limite=quantidade)
+        if not analise:
+            bot.send_message(chat_id, "❌ Não foi possível recuperar o ponto inicial.")
+            return
+
+        if len(analise["registros"]) < quantidade:
+            disponiveis = len(analise["registros"])
+            quantidade_texto = f"{quantidade:,}".replace(",", ".")
+            disponiveis_texto = f"{disponiveis:,}".replace(",", ".")
+
+            dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+            rotulo_ponto, hora_branco, emoji_ponto = _identificacao_estado_surfe(estado, dados)
+
+            mensagem = "\n".join([
+                "❌ QUANTIDADE INDISPONÍVEL",
+                "",
+                f"{emoji_ponto} Após o ponto selecionado existem apenas {disponiveis_texto} rodadas disponíveis.",
+                "",
+                f"📊 Você solicitou {quantidade_texto} rodadas, mas ainda não existem {quantidade_texto} rodadas após esse ponto.",
+                "",
+                "🏄 SOBRE A ANÁLISE SURF",
+                "",
+                "Após o ponto selecionado, serão analisados dois caminhos simultaneamente:",
+                "",
+                "⚫ SURFE 2 PRETOS:",
+                "⚫⚫ → 🔴🔴 → ⚫⚫ → 🔴🔴...",
+                "",
+                "🔴 SURFE 2 VERMELHOS:",
+                "🔴🔴 → ⚫⚫ → 🔴🔴 → ⚫⚫...",
+                "",
+                "✅ Se a cor for igual: ACERTO",
+                "❌ Se for diferente: GALE 1, GALE 2, GALE 3...",
+                "",
+                "⚪ Os próximos Brancos não interrompem nem reiniciam o caminho.",
+                "",
+                f"🕐 {rotulo_ponto}: {hora_branco}",
+                "",
+                f"💡 Você pode escolher outra quantidade ou analisar agora todas as {disponiveis_texto} rodadas disponíveis.",
+                "",
+                "👇 Clique abaixo para continuar:",
+            ])
+
+            markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+            if disponiveis > 0:
+                markup.add(
+                    telebot.types.InlineKeyboardButton(
+                        f"👁️ VER {disponiveis_texto} RODADAS DISPONÍVEIS",
+                        callback_data=f"surfe_disponiveis:{disponiveis}"
+                    )
+                )
+            markup.add(
+                telebot.types.InlineKeyboardButton(
+                    "🔽 OCULTAR SURF", callback_data="surfe_ocultar"
+                )
+            )
+            m = bot.send_message(chat_id, mensagem, reply_markup=markup)
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+            return
+
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("👁️ VER SURFE", callback_data="surfe_ver"))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+        rotulo_ponto, hora_branco, emoji_ponto = _identificacao_estado_surfe(estado, dados)
+        quantidade_texto = f"{quantidade:,}".replace(",", ".")
+        explicacao = "\n".join([
+            "🏄 SURFE — ANÁLISE ESTATÍSTICA",
+            "",
+            f"📚 Serão analisadas as {quantidade_texto} rodadas após o ponto selecionado.",
+            "",
+            "📌 COMO FUNCIONA:",
+            "",
+            "Após o ponto selecionado, começamos dois caminhos simultaneamente:",
+            "",
+            "⚫ SURFE 2 PRETOS:",
+            "⚫⚫ → 🔴🔴 → ⚫⚫ → 🔴🔴...",
+            "",
+            "🔴 SURFE 2 VERMELHOS:",
+            "🔴🔴 → ⚫⚫ → 🔴🔴 → ⚫⚫...",
+            "",
+            "A cada rodada, comparamos a cor que realmente",
+            "saiu com a cor que cada SURFE teria jogado.",
+            "",
+            "✅ Se a cor for igual: ACERTO",
+            "❌ Se for diferente: GALE 1, GALE 2, GALE 3...",
+            "O Gale continua aumentando até acertar.",
+            "",
+            "⚪ Os Brancos seguintes não interrompem",
+            "nem reiniciam o caminho. A análise continua",
+            f"normalmente até completar as {quantidade_texto} rodadas.",
+            "",
+            "━━━━━━━━━━━━━━━━━━",
+            f"🕐 {rotulo_ponto}: {hora_branco}",
+            "",
+            (
+                "👇 Clique abaixo para visualizar as rodadas:"
+                if estado.get("modo_todas")
+                else f"👇 Clique abaixo para visualizar as {quantidade_texto} rodadas:"
+            ),
+        ])
+        m = bot.send_message(chat_id, explicacao, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_disponiveis:"))
+def surfe_disponiveis_callback(call):
+    try:
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        if estado.get("branco_index") is None:
+            bot.answer_callback_query(call.id)
+            bot.send_message(chat_id, "❌ Escolha primeiro um ponto para iniciar o SURF.")
+            return
+
+        disponiveis = int(call.data.split(":", 1)[1])
+        if disponiveis <= 0:
+            bot.answer_callback_query(call.id)
+            bot.send_message(chat_id, "❌ Não existem rodadas disponíveis após esse ponto.")
+            return
+
+        # Usa exatamente todas as rodadas disponíveis após o Branco selecionado.
+        estado["quantidade"] = disponiveis
+        surfe_cache[chat_id] = estado
+
+        # Reaproveita o mesmo fluxo já usado pelo botão VER SURFE.
+        surfe_ver_callback(call)
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_ver")
+def surfe_ver_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        indice = estado.get("branco_index")
+        quantidade = estado.get("quantidade")
+
+        if indice is None:
+            bot.send_message(chat_id, "❌ Escolha primeiro um ponto para iniciar o SURF.")
+            return
+
+        if quantidade is None:
+            bot.send_message(chat_id, "❌ Escolha primeiro a quantidade de rodadas.")
+            return
+
+        analise = analisar_surfe_a_partir_do_branco(indice, limite=quantidade)
+        if not analise:
+            bot.send_message(chat_id, "❌ Não foi possível recuperar o ponto inicial.")
+            return
+
+        if len(analise["registros"]) < quantidade:
+            disponiveis = len(analise["registros"])
+            quantidade_texto = f"{quantidade:,}".replace(",", ".")
+            disponiveis_texto = f"{disponiveis:,}".replace(",", ".")
+
+            dados = list(reversed(obter_historico_banco(limite=ANALYSIS_ROUNDS)))
+            rotulo_ponto, hora_branco, emoji_ponto = _identificacao_estado_surfe(estado, dados)
+
+            mensagem = "\n".join([
+                "❌ QUANTIDADE INDISPONÍVEL",
+                "",
+                f"{emoji_ponto} Após o ponto selecionado existem apenas {disponiveis_texto} rodadas disponíveis.",
+                "",
+                f"📊 Você solicitou {quantidade_texto} rodadas, mas ainda não existem {quantidade_texto} rodadas após esse ponto.",
+                "",
+                "🏄 SOBRE A ANÁLISE SURF",
+                "",
+                "Após o ponto selecionado, serão analisados dois caminhos simultaneamente:",
+                "",
+                "⚫ SURFE 2 PRETOS:",
+                "⚫⚫ → 🔴🔴 → ⚫⚫ → 🔴🔴...",
+                "",
+                "🔴 SURFE 2 VERMELHOS:",
+                "🔴🔴 → ⚫⚫ → 🔴🔴 → ⚫⚫...",
+                "",
+                "✅ Se a cor for igual: ACERTO",
+                "❌ Se for diferente: GALE 1, GALE 2, GALE 3...",
+                "",
+                "⚪ Os próximos Brancos não interrompem nem reiniciam o caminho.",
+                "",
+                f"🕐 {rotulo_ponto}: {hora_branco}",
+                "",
+                f"💡 Você pode escolher outra quantidade ou analisar agora todas as {disponiveis_texto} rodadas disponíveis.",
+                "",
+                "👇 Clique abaixo para continuar:",
+            ])
+
+            markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+            if disponiveis > 0:
+                markup.add(
+                    telebot.types.InlineKeyboardButton(
+                        f"👁️ VER {disponiveis_texto} RODADAS DISPONÍVEIS",
+                        callback_data=f"surfe_disponiveis:{disponiveis}"
+                    )
+                )
+            markup.add(
+                telebot.types.InlineKeyboardButton(
+                    "🔽 OCULTAR SURF", callback_data="surfe_ocultar"
+                )
+            )
+
+            m = bot.send_message(chat_id, mensagem, reply_markup=markup)
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+            return
+
+        # Guarda exatamente o mesmo recorte que acabou de ser exibido no SURF.
+        # A área APOSTA e a análise por gatilho reutilizam este resultado, evitando
+        # reconstruir o Branco por uma posição que pode mudar na janela móvel.
+        estado["ultima_analise"] = analise
+        surfe_cache[chat_id] = estado
+
+        resultado = montar_resultado_surfe(analise)
+
+        # Cabeçalho e estatística continuam separados.
+        # As rodadas agora são enviadas em blocos naturais:
+        # 01–99, 100–199, 200–299 ... sem corte por caracteres.
+        partes = resultado.split("§§§SURF_RODADAS§§§", 1)
+        mensagem_cabecalho = partes[0].strip()
+        restante = partes[1] if len(partes) == 2 else ""
+        partes2 = restante.split("§§§SURF_ESTATISTICA§§§", 1)
+        mensagem_estatistica = partes2[1].strip() if len(partes2) == 2 else ""
+
+        if mensagem_cabecalho:
+            m = bot.send_message(chat_id, mensagem_cabecalho)
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+        # Repete SURF🔴 / SURF⚫ no topo de cada novo bloco.
+        for bloco_rodadas in _montar_blocos_surfe(analise["registros"]):
+            m = bot.send_message(chat_id, bloco_rodadas)
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+        # No modo TODOS/999+, o RESULTADO só aparece quando o usuário parar
+        # os registros ou quando não houver mais rodadas para carregar.
+        total_disponivel = len(analisar_surfe_a_partir_do_branco(indice, limite=ANALYSIS_ROUNDS)["registros"])
+        consulta_expandivel = quantidade >= 999 and quantidade < total_disponivel
+
+        if consulta_expandivel:
+            estado["consulta_registros_aberta"] = True
+            surfe_cache[chat_id] = estado
+
+            markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+            markup.add(telebot.types.InlineKeyboardButton(
+                "➕ VER MAIS 500", callback_data="surfe_mais_500"
+            ))
+            markup.add(telebot.types.InlineKeyboardButton(
+                "⏹ PARAR REGISTROS", callback_data="surfe_parar_registros"
+            ))
+            markup.add(telebot.types.InlineKeyboardButton(
+                "🔽 OCULTAR SURF", callback_data="surfe_ocultar"
+            ))
+            m = bot.send_message(
+                chat_id,
+                f"📚 {quantidade} rodadas exibidas.\n"
+                "👇 Você pode carregar mais 500 ou parar aqui para ver o resultado:",
+                reply_markup=markup,
+            )
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+            return
+
+        estado["consulta_registros_aberta"] = False
+        surfe_cache[chat_id] = estado
+
+        if mensagem_estatistica:
+            m = bot.send_message(chat_id, mensagem_estatistica)
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("🔥 VER GALES", callback_data="surfe_gales"))
+        markup.add(telebot.types.InlineKeyboardButton("🔥 GALE AVANÇADO", callback_data="surfe_gale_avancado"))
+        markup.add(telebot.types.InlineKeyboardButton("💰 APOSTA", callback_data="surfe_aposta_menu"))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+
+        m = bot.send_message(
+            chat_id,
+            f"👇 Depois das {quantidade} rodadas, você pode consultar os Gales:",
+            reply_markup=markup
+        )
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(
+                call.message.chat.id,
+                f"❌ Erro no SURF: {type(erro).__name__}: {str(erro)[:250]}"
+            )
+        except Exception:
+            pass
+
+
+
+def _surfe_enviar_resultado_final_registros(chat_id, analise):
+    """Envia o RESULTADO somente quando a consulta de registros for encerrada."""
+    estado = surfe_cache.get(chat_id) or {}
+    estado["ultima_analise"] = analise
+    estado["consulta_registros_aberta"] = False
+    surfe_cache[chat_id] = estado
+
+    resultado = montar_resultado_surfe(analise)
+    partes = resultado.split("§§§SURF_ESTATISTICA§§§", 1)
+    mensagem_estatistica = partes[1].strip() if len(partes) == 2 else ""
+    if mensagem_estatistica:
+        m = bot.send_message(chat_id, mensagem_estatistica)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    markup.add(telebot.types.InlineKeyboardButton("🔥 VER GALES", callback_data="surfe_gales"))
+    markup.add(telebot.types.InlineKeyboardButton("🔥 GALE AVANÇADO", callback_data="surfe_gale_avancado"))
+    markup.add(telebot.types.InlineKeyboardButton("💰 APOSTA", callback_data="surfe_aposta_menu"))
+    markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+
+    total_txt = f"{len(analise['registros']):,}".replace(",", ".")
+    m = bot.send_message(
+        chat_id,
+        f"✅ Consulta de registros encerrada em {total_txt} rodadas.\n"
+        "👇 Agora você pode consultar o resultado e os Gales:",
+        reply_markup=markup,
+    )
+    surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_parar_registros")
+def surfe_parar_registros_callback(call):
+    try:
+        bot.answer_callback_query(call.id, "Encerrando registros...")
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        if not estado.get("consulta_registros_aberta"):
+            bot.send_message(chat_id, "ℹ️ Esta consulta de registros já foi encerrada.")
+            return
+
+        analise = estado.get("ultima_analise")
+        if not analise:
+            indice = estado.get("branco_index")
+            quantidade = int(estado.get("quantidade") or 0)
+            if indice is None or quantidade <= 0:
+                bot.send_message(chat_id, "❌ Não encontrei uma consulta aberta para encerrar.")
+                return
+            analise = analisar_surfe_a_partir_do_branco(indice, limite=quantidade)
+
+        if not analise:
+            bot.send_message(chat_id, "❌ Não foi possível calcular o resultado desta consulta.")
+            return
+
+        _surfe_enviar_resultado_final_registros(chat_id, analise)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao encerrar registros: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_mais_500")
+def surfe_mais_500_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        indice = estado.get("branco_index")
+        quantidade_atual = int(estado.get("quantidade") or 0)
+        if indice is None or quantidade_atual < 999:
+            bot.send_message(chat_id, "❌ Abra primeiro uma análise de 999 rodadas.")
+            return
+        if not estado.get("consulta_registros_aberta", True):
+            bot.send_message(chat_id, "ℹ️ Esta consulta já foi encerrada. Abra uma nova análise para continuar.")
+            return
+
+        analise_total = analisar_surfe_a_partir_do_branco(indice, limite=ANALYSIS_ROUNDS)
+        if not analise_total:
+            bot.send_message(chat_id, "❌ Não foi possível recuperar o ponto inicial.")
+            return
+
+        total_disponivel = len(analise_total["registros"])
+        novo_total = min(quantidade_atual + 500, total_disponivel)
+        if novo_total <= quantidade_atual:
+            bot.send_message(chat_id, "✅ Você já chegou à rodada mais recente disponível para esse ponto inicial.")
+            return
+
+        # Recalcula até o novo limite para preservar a numeração absoluta do SURF,
+        # mas envia somente o novo bloco que ainda não tinha sido exibido.
+        analise_nova = analisar_surfe_a_partir_do_branco(indice, limite=novo_total)
+        novos_registros = analise_nova["registros"][quantidade_atual:novo_total]
+        for bloco_rodadas in _montar_blocos_surfe(novos_registros):
+            m = bot.send_message(chat_id, bloco_rodadas)
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+        estado["quantidade"] = novo_total
+        estado["ultima_analise"] = analise_nova
+        surfe_cache[chat_id] = estado
+
+        atual_txt = f"{novo_total:,}".replace(",", ".")
+        disponivel_txt = f"{total_disponivel:,}".replace(",", ".")
+        if novo_total < total_disponivel:
+            estado["consulta_registros_aberta"] = True
+            surfe_cache[chat_id] = estado
+
+            markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+            markup.add(telebot.types.InlineKeyboardButton(
+                "➕ VER MAIS 500", callback_data="surfe_mais_500"
+            ))
+            markup.add(telebot.types.InlineKeyboardButton(
+                "⏹ PARAR REGISTROS", callback_data="surfe_parar_registros"
+            ))
+            markup.add(telebot.types.InlineKeyboardButton(
+                "🔽 OCULTAR SURF", callback_data="surfe_ocultar"
+            ))
+            m = bot.send_message(
+                chat_id,
+                f"📚 Rodadas exibidas desde o ponto inicial: {atual_txt}\n"
+                f"📍 Disponíveis até a mais recente: {disponivel_txt}\n\n"
+                "👇 Carregue mais 500 ou pare aqui para ver o resultado.",
+                reply_markup=markup,
+            )
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+        else:
+            # Chegou automaticamente à rodada mais recente: não há mais o que carregar.
+            estado["consulta_registros_aberta"] = False
+            surfe_cache[chat_id] = estado
+            m = bot.send_message(
+                chat_id,
+                f"📚 Rodadas exibidas desde o ponto inicial: {atual_txt}\n"
+                f"📍 Você chegou à rodada mais recente disponível."
+            )
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+            _surfe_enviar_resultado_final_registros(chat_id, analise_nova)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao carregar mais rodadas: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+def _formatar_reais_surfe(valor):
+    valor = Decimal(valor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    texto = f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {texto}"
+
+
+def _parse_valor_aposta_surfe(texto):
+    bruto = (texto or "").strip().upper().replace("R$", "").replace(" ", "")
+    if not bruto:
+        raise InvalidOperation
+    if "," in bruto:
+        bruto = bruto.replace(".", "").replace(",", ".")
+    valor = Decimal(bruto)
+    if valor <= 0:
+        raise InvalidOperation
+    return valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _simular_aposta_surfe(analise, caminho, limite_gale, entrada):
+    """Simula a gestão por ciclos sobre os mesmos resultados exibidos no SURF."""
+    campo = "resultado_vermelho" if caminho == "Vermelho" else "resultado_preto"
+    linhas = []
+    saldo = Decimal("0.00")
+    menor_saldo = Decimal("0.00")
+    maior_saldo = Decimal("0.00")
+    maior_drawdown = Decimal("0.00")
+    maior_aposta_usada = Decimal("0.00")
+    sequencia_perdas = 0
+    maior_gale_usado = 0
+    stops = 0
+    acertos_diretos = 0
+    ciclos_recuperados = 0
+    rodadas_perdidas = 0
+    prejuizo_stops = Decimal("0.00")
+
+    for registro in analise["registros"]:
+        resultado = registro[campo]
+        aposta = entrada * (Decimal(2) ** sequencia_perdas)
+        maior_aposta_usada = max(maior_aposta_usada, aposta)
+
+        if resultado.startswith("✅"):
+            # Se não havia perda anterior, foi acerto direto. Caso contrário,
+            # a aposta vencedora recupera as perdas do ciclo e deixa +1 entrada.
+            if sequencia_perdas == 0:
+                acertos_diretos += 1
+                marcador = "✅ DIRETO"
+            else:
+                ciclos_recuperados += 1
+                marcador = f"✅ RECUPEROU G{sequencia_perdas}"
+            saldo += aposta
+            sequencia_perdas = 0
+        else:
+            rodadas_perdidas += 1
+            saldo -= aposta
+            sequencia_perdas += 1
+            maior_gale_usado = max(maior_gale_usado, sequencia_perdas)
+            marcador = f"❌ G{sequencia_perdas}"
+            if sequencia_perdas >= limite_gale:
+                stops += 1
+                prejuizo_stops += entrada * ((Decimal(2) ** limite_gale) - Decimal(1))
+                marcador += " 🛑 STOP"
+                sequencia_perdas = 0
+
+        menor_saldo = min(menor_saldo, saldo)
+        maior_saldo = max(maior_saldo, saldo)
+        maior_drawdown = max(maior_drawdown, maior_saldo - saldo)
+        numero_texto = f"{int(registro['numero']):>3}"
+        marcador_compacto = marcador
+        if marcador_compacto.startswith("✅ RECUPEROU G"):
+            marcador_compacto = marcador_compacto.replace("✅ RECUPEROU G", "♻️ REC.G", 1)
+        elif marcador_compacto.startswith("❌ G"):
+            marcador_compacto = marcador_compacto.replace("❌ G", "❌ G", 1)
+        elif marcador_compacto == "✅ DIRETO":
+            marcador_compacto = "✅ DIRETO"
+
+        # Colunas compactas para leitura no Telegram.
+        # Os espaços são apenas visuais e não alteram nenhum cálculo.
+        marcador_coluna = f"{marcador_compacto:<15}"
+        valor_coluna = _formatar_reais_surfe(aposta).replace("R$ ", "R$")
+        saldo_coluna = _formatar_reais_surfe(saldo).replace("R$ ", "")
+        linhas.append(
+            f"{numero_texto}  {marcador_coluna} {valor_coluna:<10} {saldo_coluna}"
+        )
+
+    risco_ciclo = entrada * ((Decimal(2) ** limite_gale) - Decimal(1))
+    aposta_maxima_limite = entrada * (Decimal(2) ** (limite_gale - 1))
+    ciclos_para_recuperar_stop = int(risco_ciclo / entrada)
+    ciclos_positivos = acertos_diretos + ciclos_recuperados
+    lucro_ciclos_positivos = entrada * ciclos_positivos
+
+    # Se a amostra terminar no meio de um Gale, esse ciclo ainda está aberto:
+    # as perdas já aconteceram, mas ainda não houve acerto nem STOP.
+    perda_ciclo_aberto = Decimal("0.00")
+    if sequencia_perdas > 0:
+        perda_ciclo_aberto = entrada * ((Decimal(2) ** sequencia_perdas) - Decimal(1))
+
+    saldo_por_ciclos = lucro_ciclos_positivos - prejuizo_stops - perda_ciclo_aberto
+
+    return {
+        "linhas": linhas,
+        "saldo": saldo,
+        "saldo_por_ciclos": saldo_por_ciclos,
+        "menor_saldo": menor_saldo,
+        "maior_drawdown": maior_drawdown,
+        "maior_aposta_usada": maior_aposta_usada,
+        "aposta_maxima_limite": aposta_maxima_limite,
+        "risco_ciclo": risco_ciclo,
+        "ciclos_para_recuperar_stop": ciclos_para_recuperar_stop,
+        "stops": stops,
+        "acertos_diretos": acertos_diretos,
+        "ciclos_recuperados": ciclos_recuperados,
+        "ciclos_positivos": ciclos_positivos,
+        "lucro_ciclos_positivos": lucro_ciclos_positivos,
+        "prejuizo_stops": prejuizo_stops,
+        "rodadas_perdidas": rodadas_perdidas,
+        "maior_gale_usado": maior_gale_usado,
+        "ciclo_aberto_gale": sequencia_perdas,
+        "perda_ciclo_aberto": perda_ciclo_aberto,
+    }
+
+
+
+def _obter_analise_surfe_selecionada(chat_id):
+    """Retorna o mesmo recorte exibido no SURF sempre que ele estiver em cache."""
+    estado = surfe_cache.get(chat_id) or {}
+    quantidade = estado.get("quantidade")
+    indice = estado.get("branco_index")
+    analise = estado.get("ultima_analise")
+
+    if quantidade is None or indice is None:
+        return None
+
+    if analise and len(analise.get("registros", [])) == int(quantidade):
+        return analise
+
+    analise = analisar_surfe_a_partir_do_branco(indice, limite=quantidade)
+    if analise and len(analise.get("registros", [])) == int(quantidade):
+        estado["ultima_analise"] = analise
+        surfe_cache[chat_id] = estado
+        return analise
+    return None
+
+
+def _analisar_entrada_por_gatilho(analise, caminho, gatilho):
+    """Cria uma nova sequência usando o Gale escolhido como gatilho de entrada."""
+    campo = "resultado_vermelho" if caminho == "Vermelho" else "resultado_preto"
+    registros = analise.get("registros", [])
+    oportunidades = []
+
+    # O gatilho aparece em uma rodada; a entrada é avaliada somente na rodada seguinte.
+    for pos in range(len(registros) - 1):
+        atual = registros[pos]
+        resultado_atual = str(atual.get(campo, ""))
+        if resultado_atual != f"❌ GALE {gatilho}":
+            continue
+
+        proxima = registros[pos + 1]
+        resultado_entrada = str(proxima.get(campo, ""))
+        oportunidades.append({
+            "gatilho_rodada": int(atual.get("numero", pos + 1)),
+            "entrada_rodada": int(proxima.get("numero", pos + 2)),
+            "acertou": resultado_entrada.startswith("✅"),
+            "resultado_original": resultado_entrada,
+        })
+
+    sequencia_perdas = 0
+    maior_gale = 0
+    gale_counts = {}
+    acertos = 0
+    erros = 0
+    acertos_diretos = 0
+    ciclos_recuperados = 0
+    linhas = []
+
+    for numero_oportunidade, item in enumerate(oportunidades, start=1):
+        if item["acertou"]:
+            acertos += 1
+            if sequencia_perdas == 0:
+                acertos_diretos += 1
+                marcador = "✅ DIRETO"
+            else:
+                ciclos_recuperados += 1
+                marcador = f"♻️ REC.G{sequencia_perdas}"
+                sequencia_perdas = 0
+        else:
+            erros += 1
+            sequencia_perdas += 1
+            maior_gale = max(maior_gale, sequencia_perdas)
+            gale_counts[sequencia_perdas] = gale_counts.get(sequencia_perdas, 0) + 1
+            marcador = f"❌ G{sequencia_perdas}"
+
+        # Deixa explícito o que é gatilho do SURF e o que é Gale da aposta.
+        if marcador.startswith("❌ G"):
+            marcador_exibicao = marcador.replace("❌ G", "❌ APOSTA G", 1)
+        else:
+            marcador_exibicao = marcador
+
+        linhas.append(
+            f"{numero_oportunidade:02d}  🎯 G{gatilho} na {item['gatilho_rodada']} → "
+            f"💰 Entrada {item['entrada_rodada']} → {marcador_exibicao}"
+        )
+
+    total = len(oportunidades)
+    taxa = (acertos / total * 100) if total else 0.0
+    unidades = acertos - erros
+
+    if total < 20:
+        classificacao = "AMOSTRA PEQUENA ⚠️"
+    elif unidades > 0:
+        classificacao = "POSITIVA NO RECORTE ✅"
+    elif unidades < 0:
+        classificacao = "NEGATIVA NO RECORTE ❌"
+    else:
+        classificacao = "NEUTRA NO RECORTE ➖"
+
+    return {
+        "gatilho": gatilho,
+        "oportunidades": oportunidades,
+        "linhas": linhas,
+        "total": total,
+        "acertos": acertos,
+        "erros": erros,
+        "taxa": taxa,
+        "unidades": unidades,
+        "classificacao": classificacao,
+        "acertos_diretos": acertos_diretos,
+        "ciclos_recuperados": ciclos_recuperados,
+        "maior_gale": maior_gale,
+        "gale_counts": gale_counts,
+        "ciclo_aberto_gale": sequencia_perdas,
+    }
+
+
+def _enviar_blocos_gatilho_surfe(chat_id, linhas):
+    """Envia a entrada por gatilho em mensagens separadas de até 10 entradas."""
+    if not linhas:
+        return
+
+    # Cada grupo de 10 entradas vira um novo balão/mensagem no Telegram.
+    # Isso evita que uma sequência grande continue no mesmo balão e bata
+    # no limite de caracteres da mensagem.
+    for inicio in range(0, len(linhas), 10):
+        bloco = linhas[inicio:inicio + 10]
+        m = bot.send_message(chat_id, "\n".join(bloco))
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+
+def _enviar_blocos_aposta_surfe(chat_id, linhas):
+    """Envia a simulação em novos balões, com no máximo 10 entradas por mensagem."""
+    if not linhas:
+        return
+
+    # Regra visual: 1–10 em um balão, 11–20 em outro, e assim por diante.
+    for inicio in range(0, len(linhas), 10):
+        bloco = linhas[inicio:inicio + 10]
+        eh_ultimo = inicio + 10 >= len(linhas)
+        markup = None
+        if eh_ultimo:
+            markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                telebot.types.InlineKeyboardButton(
+                    "⬆️ ENTENDER A SIMULAÇÃO ⬆️",
+                    callback_data="surfe_aposta_simulacao_info",
+                )
+            )
+        m = bot.send_message(chat_id, "\n".join(bloco), reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+
+def _receber_valor_aposta_surfe(message):
+    chat_id = message.chat.id
+    estado = surfe_cache.get(chat_id) or {}
+    try:
+        caminho = estado.get("aposta_caminho")
+        limite_gale = estado.get("aposta_limite_gale")
+        indice = estado.get("branco_index")
+        quantidade = estado.get("quantidade")
+        if caminho not in ("Vermelho", "Preto") or not limite_gale or indice is None or not quantidade:
+            bot.send_message(chat_id, "❌ A configuração da APOSTA expirou. Abra novamente o botão 💰 APOSTA.")
+            return
+
+        try:
+            entrada = _parse_valor_aposta_surfe(message.text)
+        except (InvalidOperation, ValueError):
+            msg = bot.send_message(
+                chat_id,
+                "❌ Valor inválido.\n\n"
+                "Digite somente o valor da aposta inicial.\n"
+                "Exemplos: 0,10 | 0,20 | 1,00"
+            )
+            bot.register_next_step_handler(msg, _receber_valor_aposta_surfe)
+            return
+
+        analise = _obter_analise_surfe_selecionada(chat_id)
+        if not analise:
+            bot.send_message(chat_id, "❌ As rodadas selecionadas não estão mais disponíveis para a simulação.")
+            return
+
+        resultado = _simular_aposta_surfe(analise, caminho, int(limite_gale), entrada)
+        campo_base = "resultado_vermelho" if caminho == "Vermelho" else "resultado_preto"
+        resultados_base = [str(x.get(campo_base, "")).startswith("✅") for x in analise["registros"]]
+        estado["gale_avancado_base"] = {
+            "resultados": resultados_base,
+            "entrada": str(entrada),
+            "titulo": "💵 SIMULAÇÃO CONTÍNUA",
+            "subtitulo": f"{_identificacao_ponto_surfe(analise)} {analise['data_ponto']} às {analise['hora_ponto']}",
+        }
+        surfe_cache[chat_id] = estado
+        cor = "🔴" if caminho == "Vermelho" else "⚫"
+        nome = "2 VERMELHOS" if caminho == "Vermelho" else "2 PRETOS"
+
+        cabecalho = "\n".join([
+            f"💰 SIMULAÇÃO DE APOSTA — SURF{cor}",
+            "",
+            f"🏄 Caminho: SURF {nome}",
+            f"📚 Rodadas: {quantidade}",
+            f"{_identificacao_ponto_surfe(analise)} inicial: {analise['data_ponto']} às {analise['hora_ponto']}",
+            f"💵 Entrada inicial: {_formatar_reais_surfe(entrada)}",
+            f"🎯 Limite escolhido: G{limite_gale}",
+            "",
+            "📌 REGRA DA SIMULAÇÃO",
+            "A cada perda, a próxima aposta dobra.",
+            f"Se perder também no G{limite_gale}, registra STOP.",
+            "Na rodada seguinte ao STOP, volta para a entrada inicial.",
+            "Se acertar antes do limite, o próximo ciclo também volta para a entrada inicial.",
+            "",
+            "👇 Abaixo está a simulação sobre a mesma sequência de rodadas do SURF:",
+        ])
+        m = bot.send_message(chat_id, cabecalho)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+        _enviar_blocos_aposta_surfe(chat_id, resultado["linhas"])
+
+        status = "POSITIVO ✅" if resultado["saldo"] > 0 else ("NEGATIVO ❌" if resultado["saldo"] < 0 else "EMPATE ➖")
+        compensou = "SIM ✅" if resultado["saldo"] >= 0 else "NÃO ❌"
+        maior_gale_texto = f"G{resultado['maior_gale_usado']}" if resultado["maior_gale_usado"] else "Nenhum"
+
+        resumo_linhas = [
+            "📊 RESULTADO FINANCEIRO DA SIMULAÇÃO",
+            "",
+            f"🏄 SURF {nome}",
+            f"📚 Rodadas analisadas: {quantidade}",
+            f"💵 Entrada inicial: {_formatar_reais_surfe(entrada)}",
+            f"🎯 Limite escolhido: G{limite_gale}",
+            "",
+            "📊 RESULTADO DOS CICLOS",
+            "",
+            f"🟢 Acertos diretos: {resultado['acertos_diretos']}",
+            f"♻️ Ciclos recuperados no Gale: {resultado['ciclos_recuperados']}",
+            f"🛑 Stops no G{limite_gale}: {resultado['stops']}",
+            f"💰 Ciclos positivos: {resultado['ciclos_positivos']}",
+            f"💵 Lucro dos ciclos positivos: +{_formatar_reais_surfe(resultado['lucro_ciclos_positivos'])}",
+            f"💸 Prejuízo total dos Stops: -{_formatar_reais_surfe(resultado['prejuizo_stops'])}",
+        ]
+
+        if resultado["ciclo_aberto_gale"] > 0:
+            resumo_linhas.extend([
+                f"⏳ Ciclo em aberto no final: G{resultado['ciclo_aberto_gale']}",
+                f"📌 Perda já acumulada nesse ciclo: -{_formatar_reais_surfe(resultado['perda_ciclo_aberto'])}",
+            ])
+
+        resumo_linhas.extend([
+            "",
+            "💰 RESULTADO FINAL",
+            "",
+            f"📈 Saldo final: {_formatar_reais_surfe(resultado['saldo'])} — {status}",
+            f"📉 Maior déficit a partir do saldo inicial: {_formatar_reais_surfe(resultado['menor_saldo'])}",
+            f"📉 Maior queda a partir de um pico: {_formatar_reais_surfe(resultado['maior_drawdown'])}",
+            "",
+            f"🔥 Maior Gale realmente utilizado: {maior_gale_texto}",
+            f"💵 Maior aposta realmente realizada: {_formatar_reais_surfe(resultado['maior_aposta_usada'])}",
+            f"🎯 Maior aposta permitida no G{limite_gale}: {_formatar_reais_surfe(resultado['aposta_maxima_limite'])}",
+            "",
+            "♻️ RECUPERAÇÃO DAS PERDAS",
+            "",
+            f"🛑 Valor de 1 STOP completo no G{limite_gale}: -{_formatar_reais_surfe(resultado['risco_ciclo'])}",
+            f"🎯 Para recuperar 1 STOP completo: {resultado['ciclos_para_recuperar_stop']} ciclos de +{_formatar_reais_surfe(entrada)}",
+            f"📊 As sequências deste recorte compensaram as perdas no saldo final? {compensou}",
+            "",
+            "⚠️ Esta é uma simulação matemática baseada somente nas rodadas analisadas. Resultado passado não garante resultado futuro.",
+        ])
+        resumo = "\n".join(resumo_linhas)
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("⬆️ ENTENDER O RESULTADO ⬆️", callback_data="surfe_aposta_info"))
+        markup.add(telebot.types.InlineKeyboardButton("💰 NOVA SIMULAÇÃO", callback_data="surfe_aposta_continua"))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        m = bot.send_message(chat_id, resumo, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(chat_id, f"❌ Erro na simulação de APOSTA: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_aposta_simulacao_info")
+def surfe_aposta_simulacao_info_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        sem_limite = (
+            estado.get("gatilho_modo") == "sem_limite"
+            or estado.get("aposta_modo") == "sem_limite"
+        )
+        linhas = [
+            "ℹ️ COMO ENTENDER A SIMULAÇÃO",
+            "",
+            "Cada linha representa uma entrada realizada pela estratégia.",
+            "",
+            "❌ PERDEU",
+            "A entrada perdeu. Na próxima oportunidade válida, o valor aumenta seguindo a progressão.",
+            "",
+            "♻️ RECUPEROU",
+            "Depois de uma ou mais perdas, a entrada acertou e recuperou o ciclo. A próxima entrada volta ao valor inicial.",
+            "",
+            "✅ ACERTO DIRETO",
+            "A entrada acertou usando o valor inicial, sem precisar de progressão.",
+            "",
+            "💵 VALOR DA APOSTA",
+            "É o valor utilizado naquela entrada. Exemplo com R$10: R$10 → R$20 → R$40 → R$80...",
+            "",
+            "📊 SALDO",
+            "É o lucro ou prejuízo total acumulado depois daquela entrada.",
+            "",
+            "📌 EXEMPLO",
+            "❌  R$40,00  R$-70,00 = apostou R$40, perdeu e o saldo acumulado ficou em -R$70.",
+            "♻️  R$80,00  R$10,00 = apostou R$80, recuperou o ciclo e o saldo acumulado passou para +R$10.",
+        ]
+        if sem_limite:
+            linhas += [
+                "",
+                "♾️ SEM LIMITE",
+                "Não existe um Gale máximo configurado para interromper a simulação. A progressão histórica continua até uma recuperação ou até terminar o recorte analisado.",
+            ]
+        else:
+            linhas += [
+                "",
+                "🛑 STOP",
+                "No modo COM LIMITE, aparece quando a entrada perde também no Gale definido como limite. O ciclo é encerrado e a próxima oportunidade recomeça com a entrada inicial.",
+            ]
+        linhas += [
+            "",
+            "📌 Na Entrada por Gatilho, a simulação utiliza somente as oportunidades geradas pelo gatilho escolhido.",
+        ]
+        m = bot.send_message(chat_id, "\n".join(linhas))
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_aposta_info")
+def surfe_aposta_info_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        texto = "\n".join([
+            "ℹ️ COMO ENTENDER O RESULTADO DA APOSTA",
+            "",
+            "🟢 ACERTOS DIRETOS",
+            "São os ciclos em que a primeira aposta acertou, sem precisar entrar em Gale.",
+            "",
+            "♻️ CICLOS RECUPERADOS NO GALE",
+            "O ciclo começou com uma ou mais perdas, mas acertou antes do limite escolhido. As apostas dobradas recuperam as perdas anteriores e deixam somente o lucro-base da entrada inicial.",
+            "",
+            "💰 CICLOS POSITIVOS",
+            "É a soma dos acertos diretos com os ciclos recuperados no Gale. Cada ciclo positivo acrescenta o valor da entrada inicial ao resultado líquido.",
+            "",
+            "🛑 STOP",
+            "Acontece quando a sequência perde também no Gale definido como limite. O ciclo é encerrado e a rodada seguinte volta para a aposta inicial.",
+            "",
+            "💸 PREJUÍZO TOTAL DOS STOPS",
+            "É a soma das perdas de todos os ciclos que chegaram ao limite e não recuperaram.",
+            "",
+            "⏳ CICLO EM ABERTO",
+            "Se as rodadas analisadas terminarem no meio de uma sequência de Gale, essas perdas já contam no saldo, mas o ciclo ainda não teve acerto nem STOP.",
+            "",
+            "📈 SALDO FINAL",
+            "Mostra o resultado líquido real no fim do recorte: lucros dos ciclos positivos menos Stops e menos eventual ciclo ainda aberto.",
+            "",
+            "🔥 MAIOR GALE UTILIZADO",
+            "É o maior Gale que realmente apareceu durante a simulação, mesmo que o limite escolhido fosse maior.",
+            "",
+            "💵 MAIOR APOSTA REALIZADA",
+            "É o maior valor que realmente precisou ser apostado dentro das rodadas analisadas.",
+            "",
+            "📉 MAIOR DÉFICIT / MAIOR QUEDA",
+            "Mostram o pior momento financeiro da simulação e ajudam a enxergar o risco, não apenas o saldo final.",
+            "",
+            "♻️ RECUPERAÇÃO DE 1 STOP",
+            "Mostra quantos ciclos positivos, cada um com o lucro da entrada inicial, seriam necessários para compensar completamente um STOP.",
+            "",
+            "⚠️ A simulação usa apenas o histórico selecionado e não garante que o mesmo comportamento se repita no futuro.",
+        ])
+        m = bot.send_message(chat_id, texto)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_aposta_menu")
+def surfe_aposta_menu_callback(call):
+    """Abre o painel das análises disponíveis dentro de APOSTA."""
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        analise = _obter_analise_surfe_selecionada(chat_id)
+        estado = surfe_cache.get(chat_id) or {}
+        quantidade = estado.get("quantidade")
+        if not analise or quantidade is None:
+            bot.send_message(chat_id, "❌ Escolha primeiro o ponto inicial e a quantidade de rodadas.")
+            return
+
+        texto = "\n".join([
+            "💰 APOSTA — ANÁLISES",
+            "",
+            f"📚 Recorte atual: {quantidade} rodadas",
+            f"{_identificacao_ponto_surfe(analise)}: {analise['data_ponto']} às {analise['hora_ponto']}",
+            "",
+            "Escolha qual tipo de análise deseja realizar:",
+            "",
+            "💵 SIMULAÇÃO CONTÍNUA",
+            "Aposta rodada após rodada, usando a progressão e o limite de Gale escolhidos.",
+            "",
+            "🎯 ENTRADA POR GATILHO",
+            "Espera um Gale específico aparecer no SURF e só considera entrada na rodada seguinte.",
+            "Depois o bot cria uma nova sequência somente com essas oportunidades e mede os Gales entre elas.",
+            "",
+            "👇 Escolha uma análise:",
+        ])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("💵 SIMULAÇÃO CONTÍNUA", callback_data="surfe_aposta_continua"))
+        markup.add(telebot.types.InlineKeyboardButton("🎯 ENTRADA POR GATILHO", callback_data="surfe_aposta_gatilho"))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        m = bot.send_message(chat_id, texto, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro em APOSTA: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_aposta_continua")
+def surfe_aposta_continua_callback(call):
+    """Mantém a simulação financeira contínua já existente."""
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        quantidade = estado.get("quantidade")
+        analise = _obter_analise_surfe_selecionada(chat_id)
+        if quantidade is None or not analise:
+            bot.send_message(chat_id, "❌ Escolha primeiro o ponto inicial e a quantidade de rodadas.")
+            return
+
+        texto = "\n".join([
+            "💵 SIMULAÇÃO CONTÍNUA — SURF",
+            "",
+            f"📚 Esta simulação usará exatamente as mesmas {quantidade} rodadas analisadas após o ponto selecionado.",
+            f"{_identificacao_ponto_surfe(analise)}: {analise['data_ponto']} às {analise['hora_ponto']}",
+            "",
+            "📌 COMO FUNCIONA",
+            "Você escolhe qual caminho do SURF deseja testar, define até qual Gale aceita dobrar e depois informa o valor da aposta inicial.",
+            "",
+            "❌ A cada perda, a próxima aposta dobra.",
+            "✅ Ao acertar, o próximo ciclo volta para a aposta inicial.",
+            "🛑 Se perder também no limite de Gale escolhido, o sistema registra o prejuízo daquele ciclo e reinicia a rodada seguinte com a aposta inicial.",
+            "",
+            "📊 No final o bot calcula ganhos, perdas, quantidade de stops, maior aposta, perda máxima por ciclo, menor saldo e saldo final.",
+            "",
+            "🏄 ESCOLHA O SURF PARA SIMULAR",
+            "🔴 SURF 2 VERMELHOS começa: 🔴🔴 → ⚫⚫ → 🔴🔴...",
+            "⚫ SURF 2 PRETOS começa: ⚫⚫ → 🔴🔴 → ⚫⚫...",
+            "",
+            "👇 Escolha um dos caminhos:",
+        ])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("🔴 SURF 2 VERMELHOS", callback_data="surfe_aposta_caminho:Vermelho"))
+        markup.add(telebot.types.InlineKeyboardButton("⚫ SURF 2 PRETOS", callback_data="surfe_aposta_caminho:Preto"))
+        markup.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR ÀS ANÁLISES", callback_data="surfe_aposta_menu"))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        m = bot.send_message(chat_id, texto, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro na SIMULAÇÃO CONTÍNUA: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_aposta_gatilho")
+def surfe_aposta_gatilho_callback(call):
+    """Explica e inicia a análise de entrada condicionada a um Gale do SURF."""
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        quantidade = estado.get("quantidade")
+        analise = _obter_analise_surfe_selecionada(chat_id)
+        if quantidade is None or not analise:
+            bot.send_message(chat_id, "❌ Escolha primeiro o ponto inicial e a quantidade de rodadas.")
+            return
+
+        texto = "\n".join([
+            "🎯 ENTRADA POR GATILHO",
+            "",
+            "📖 COMO FUNCIONA",
+            "",
+            "Nesta análise você NÃO considera entrada em todas as rodadas.",
+            "O bot primeiro acompanha normalmente o SURF escolhido.",
+            "",
+            "Exemplo escolhendo G3:",
+            "❌ G1 → apenas observa",
+            "❌ G2 → apenas observa",
+            "❌ G3 → 🎯 GATILHO ATIVADO",
+            "➡️ A rodada seguinte vira a entrada da análise.",
+            "",
+            "Se essa entrada perder, o bot não entra imediatamente de novo.",
+            "Ele espera aparecer OUTRO G3 e usa a rodada seguinte como a próxima oportunidade.",
+            "",
+            "Assim é criada uma nova sequência somente com as entradas após o G3.",
+            "O bot mede quantos acertos, erros e Gales consecutivos apareceram nessa nova sequência.",
+            "",
+            "📊 Também mostra a taxa histórica 1:1 e a maior sequência de perdas entre os gatilhos.",
+            "⚠️ Uma amostra pequena ou um bom resultado passado não garante vantagem futura.",
+            "",
+            f"📚 Serão usadas exatamente as mesmas {quantidade} rodadas do SURF atual.",
+            "",
+            "👇 Primeiro escolha qual caminho deseja analisar:",
+        ])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("🔴 SURF 2 VERMELHOS", callback_data="surfe_gatilho_caminho:Vermelho"))
+        markup.add(telebot.types.InlineKeyboardButton("⚫ SURF 2 PRETOS", callback_data="surfe_gatilho_caminho:Preto"))
+        markup.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR ÀS ANÁLISES", callback_data="surfe_aposta_menu"))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        m = bot.send_message(chat_id, texto, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro na ENTRADA POR GATILHO: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_gatilho_caminho:"))
+def surfe_gatilho_caminho_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        caminho = call.data.split(":", 1)[1]
+        if caminho not in ("Vermelho", "Preto"):
+            return
+
+        estado = surfe_cache.get(chat_id) or {}
+        if not _obter_analise_surfe_selecionada(chat_id):
+            bot.send_message(chat_id, "❌ O recorte do SURF não está mais disponível.")
+            return
+        estado = surfe_cache.get(chat_id) or estado
+        estado["gatilho_caminho"] = caminho
+        surfe_cache[chat_id] = estado
+
+        cor = "🔴" if caminho == "Vermelho" else "⚫"
+        nome = "2 VERMELHOS" if caminho == "Vermelho" else "2 PRETOS"
+        texto = "\n".join([
+            "🎯 ESCOLHA O GALE-GATILHO",
+            "",
+            f"🏄 Caminho: {cor} SURF {nome}",
+            "",
+            "O Gale escolhido será apenas o SINAL para observar uma entrada na rodada seguinte.",
+            "",
+            "Exemplo: escolhendo G3, toda vez que o SURF chegar ao G3, o bot confere a próxima rodada e adiciona essa oportunidade à nova sequência.",
+            "",
+            "👇 Escolha o gatilho que deseja estudar:",
+        ])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=3)
+        botoes = [telebot.types.InlineKeyboardButton(f"G{n}", callback_data=f"surfe_gatilho_gale:{n}") for n in range(1, 10)]
+        for pos in range(0, len(botoes), 3):
+            markup.row(*botoes[pos:pos + 3])
+        markup.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="surfe_aposta_gatilho"))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        m = bot.send_message(chat_id, texto, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao escolher o SURF do gatilho: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_gatilho_gale:"))
+def surfe_gatilho_gale_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        gatilho = int(call.data.split(":", 1)[1])
+        if gatilho not in range(1, 10): return
+        estado = surfe_cache.get(chat_id) or {}
+        caminho = estado.get("gatilho_caminho")
+        analise = _obter_analise_surfe_selecionada(chat_id)
+        if caminho not in ("Vermelho", "Preto") or not analise:
+            bot.send_message(chat_id, "❌ Escolha novamente o SURF e o Gale-gatilho.")
+            return
+        resultado = _analisar_entrada_por_gatilho(analise, caminho, gatilho)
+        if not resultado["total"]:
+            bot.send_message(chat_id, f"❌ Nenhuma oportunidade completa após G{gatilho} foi encontrada neste recorte.")
+            return
+        estado["gatilho_gale"] = gatilho
+        estado["gatilho_resultado"] = resultado
+        surfe_cache[chat_id] = estado
+        maior = f"G{resultado['maior_gale']}" if resultado['maior_gale'] else "Nenhum"
+        texto = "\n".join([
+            f"🎯 GATILHO G{gatilho} — MODO FINANCEIRO", "",
+            f"🔎 Oportunidades encontradas: {resultado['total']}",
+            f"🔥 Maior Gale observado entre os gatilhos: {maior}", "",
+            "♾️ SEM LIMITE",
+            "Deixa a progressão seguir historicamente até o acerto e calcula lucro total, maior Gale solucionado, maior aposta e capital exigido no pior ciclo.", "",
+            "🛑 COM LIMITE",
+            "Você escolhe G1 a G9. Ao atingir o limite sem acerto, registra STOP e reinicia na próxima oportunidade do mesmo gatilho.", "",
+            "👇 Escolha o modo:",
+        ])
+        markup=telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("♾️ SEM LIMITE", callback_data="surfe_gatilho_modo:sem_limite"))
+        markup.add(telebot.types.InlineKeyboardButton("🛑 COM LIMITE", callback_data="surfe_gatilho_modo:com_limite"))
+        markup.add(telebot.types.InlineKeyboardButton("🎯 TESTAR OUTRO GATILHO", callback_data=f"surfe_gatilho_caminho:{caminho}"))
+        m=bot.send_message(chat_id,texto,reply_markup=markup); surfe_mensagens_abertas.setdefault(chat_id,[]).append(m.message_id)
+    except Exception as erro:
+        traceback.print_exc(); bot.send_message(call.message.chat.id, f"❌ Erro ao analisar gatilho: {type(erro).__name__}: {str(erro)[:200]}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_gatilho_modo:"))
+def surfe_gatilho_modo_callback(call):
+    bot.answer_callback_query(call.id)
+    chat_id=call.message.chat.id; modo=call.data.split(":",1)[1]
+    estado=surfe_cache.get(chat_id) or {}; gatilho=estado.get("gatilho_gale")
+    if not gatilho: bot.send_message(chat_id,"❌ Escolha novamente o Gale-gatilho."); return
+    if modo=="com_limite":
+        markup=telebot.types.InlineKeyboardMarkup(row_width=3)
+        bs=[telebot.types.InlineKeyboardButton(f"G{n}",callback_data=f"surfe_gatilho_limite:{n}") for n in range(1,10)]
+        for pos in range(0,9,3): markup.row(*bs[pos:pos+3])
+        m=bot.send_message(chat_id,"🛑 LIMITE DA PROGRESSÃO ENTRE GATILHOS\n\nEscolha o Gale máximo antes de registrar STOP:",reply_markup=markup); surfe_mensagens_abertas.setdefault(chat_id,[]).append(m.message_id); return
+    estado["gatilho_modo"]="sem_limite"; estado.pop("gatilho_limite",None); surfe_cache[chat_id]=estado
+    msg=bot.send_message(chat_id,"💵 VALOR INICIAL — GATILHO SEM LIMITE\n\nDigite o valor da primeira aposta.\nExemplos: 0,10 | 1,00 | 10,00")
+    surfe_mensagens_abertas.setdefault(chat_id,[]).append(msg.message_id); bot.register_next_step_handler(msg,_receber_valor_gatilho_surfe)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_gatilho_limite:"))
+def surfe_gatilho_limite_callback(call):
+    bot.answer_callback_query(call.id); chat_id=call.message.chat.id
+    limite=int(call.data.split(":",1)[1]); estado=surfe_cache.get(chat_id) or {}
+    estado["gatilho_modo"]="com_limite"; estado["gatilho_limite"]=limite; surfe_cache[chat_id]=estado
+    msg=bot.send_message(chat_id,f"💵 VALOR INICIAL — GATILHO COM LIMITE G{limite}\n\nDigite o valor da primeira aposta:")
+    surfe_mensagens_abertas.setdefault(chat_id,[]).append(msg.message_id); bot.register_next_step_handler(msg,_receber_valor_gatilho_surfe)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_aposta_caminho:"))
+def surfe_aposta_caminho_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        caminho = call.data.split(":", 1)[1]
+        if caminho not in ("Vermelho", "Preto"):
+            return
+        estado = surfe_cache.get(chat_id) or {}
+        if estado.get("branco_index") is None or estado.get("quantidade") is None:
+            bot.send_message(chat_id, "❌ Escolha primeiro o ponto inicial e a quantidade de rodadas.")
+            return
+        estado["aposta_caminho"] = caminho
+        estado.pop("aposta_limite_gale", None)
+        surfe_cache[chat_id] = estado
+
+        cor = "🔴" if caminho == "Vermelho" else "⚫"
+        nome = "2 VERMELHOS" if caminho == "Vermelho" else "2 PRETOS"
+        texto = "\n".join([
+            "⚙️ MODO DA SIMULAÇÃO",
+            "",
+            f"🏄 Escolhido: {cor} SURF {nome}",
+            "",
+            "♾️ SEM LIMITE",
+            "A progressão histórica continua até encontrar um acerto. O resultado mostra o maior Gale solucionado, a maior aposta realizada, o capital exigido no pior ciclo e o lucro/prejuízo final.",
+            "",
+            "🛑 COM LIMITE",
+            "Você escolhe G1 a G9. Se perder também no limite escolhido, registra STOP e o próximo ciclo volta para a entrada inicial.",
+            "",
+            "👇 Escolha como deseja simular:",
+        ])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("♾️ SEM LIMITE", callback_data="surfe_aposta_modo:sem_limite"))
+        markup.add(telebot.types.InlineKeyboardButton("🛑 COM LIMITE", callback_data="surfe_aposta_modo:com_limite"))
+        markup.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data="surfe_aposta_continua"))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        m = bot.send_message(chat_id, texto, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao escolher o SURF: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_aposta_modo:"))
+def surfe_aposta_modo_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        modo = call.data.split(":", 1)[1]
+        estado = surfe_cache.get(chat_id) or {}
+        caminho = estado.get("aposta_caminho")
+        if caminho not in ("Vermelho", "Preto"):
+            bot.send_message(chat_id, "❌ Escolha primeiro qual SURF deseja simular.")
+            return
+        if modo == "com_limite":
+            texto = "🎯 LIMITE DE GALE\n\n👇 Escolha até qual Gale deseja aceitar antes do STOP:"
+            markup = telebot.types.InlineKeyboardMarkup(row_width=3)
+            botoes = [telebot.types.InlineKeyboardButton(f"G{n}", callback_data=f"surfe_aposta_gale:{n}") for n in range(1, 10)]
+            for pos in range(0, len(botoes), 3): markup.row(*botoes[pos:pos + 3])
+            markup.add(telebot.types.InlineKeyboardButton("⬅️ VOLTAR", callback_data=f"surfe_aposta_caminho:{caminho}"))
+            m = bot.send_message(chat_id, texto, reply_markup=markup)
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+            return
+        if modo != "sem_limite": return
+        estado["aposta_modo"] = "sem_limite"
+        estado.pop("aposta_limite_gale", None)
+        surfe_cache[chat_id] = estado
+        msg = bot.send_message(chat_id, "💵 VALOR DA APOSTA INICIAL — SEM LIMITE\n\nDigite o valor inicial.\nExemplos: 0,10 | 1,00 | 10,00\n\n♾️ O bot deixará cada progressão histórica seguir até o acerto e mostrará o maior valor necessário no recorte.")
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(msg.message_id)
+        bot.register_next_step_handler(msg, _receber_valor_sem_limite_surfe)
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro ao escolher modo: {type(erro).__name__}: {str(erro)[:200]}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_aposta_gale:"))
+def surfe_aposta_gale_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        limite = int(call.data.split(":", 1)[1])
+        if limite not in range(1, 10):
+            return
+        estado = surfe_cache.get(chat_id) or {}
+        caminho = estado.get("aposta_caminho")
+        if caminho not in ("Vermelho", "Preto"):
+            bot.send_message(chat_id, "❌ Escolha primeiro qual SURF deseja simular.")
+            return
+        estado["aposta_limite_gale"] = limite
+        surfe_cache[chat_id] = estado
+        cor = "🔴" if caminho == "Vermelho" else "⚫"
+
+        texto = "\n".join([
+            "💵 VALOR DA APOSTA INICIAL",
+            "",
+            f"🏄 SURF escolhido: {cor}",
+            f"🎯 Limite escolhido: G{limite}",
+            "",
+            "Agora digite quanto deseja apostar na primeira entrada.",
+            "",
+            "Exemplos:",
+            "0,10",
+            "0,20",
+            "1,00",
+            "",
+            "📌 O sistema calculará automaticamente os valores dobrados até o limite escolhido e mostrará qual seria a maior aposta e o risco máximo do ciclo.",
+            "",
+            "👇 Digite o valor da entrada inicial:",
+        ])
+        msg = bot.send_message(chat_id, texto)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(msg.message_id)
+        bot.register_next_step_handler(msg, _receber_valor_aposta_surfe)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao escolher Gale: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_gales")
+def surfe_gales_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        indice = estado.get("branco_index")
+        quantidade = estado.get("quantidade")
+        if indice is None or quantidade is None:
+            bot.send_message(chat_id, "❌ Escolha primeiro o ponto inicial e a quantidade de rodadas.")
+            return
+        analise = analisar_surfe_a_partir_do_branco(indice, limite=quantidade)
+        if not analise or len(analise["registros"]) < quantidade:
+            bot.send_message(chat_id, "❌ Não há rodadas suficientes para consultar os Gales.")
+            return
+        texto = "\n\n".join([
+            _resumo_gales_surfe(analise["stats"], "Preto", "🔥 GALES — SURF⚫"),
+            _resumo_gales_surfe(analise["stats"], "Vermelho", "🔥 GALES — SURF🔴"),
+        ])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        m = bot.send_message(chat_id, texto, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro nos GALES: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_controle")
+def surfe_controle_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        estado = surfe_cache.get(chat_id) or {}
+        indice = estado.get("branco_index")
+
+        if indice is None:
+            bot.send_message(
+                chat_id,
+                "❌ Escolha primeiro um ponto para iniciar o SURF."
+            )
+            return
+
+        analise = analisar_surfe_a_partir_do_branco(indice, limite=None)
+        if not analise:
+            bot.send_message(
+                chat_id,
+                "❌ Não foi possível recuperar o ponto inicial."
+            )
+            return
+
+        resultado = montar_controle_geral_surfe(analise)
+
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            telebot.types.InlineKeyboardButton(
+                "🔽 OCULTAR SURF",
+                callback_data="surfe_ocultar"
+            )
+        )
+
+        m = bot.send_message(chat_id, resultado, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(
+                call.message.chat.id,
+                f"❌ Erro no CONTROLE GERAL: {type(erro).__name__}: {str(erro)[:250]}"
+            )
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_caminho:"))
+def surfe_caminho_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        caminho = call.data.split(":", 1)[1]
+
+        if caminho == "Branco":
+            analise = analisar_surfe_inicial()
+            if not analise:
+                bot.send_message(chat_id, "❌ Não encontrei nenhum ⚪ Branco nas 2.000 rodadas disponíveis mais recentes.")
+                return
+            msg = bot.send_message(chat_id, analise["intro"])
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(msg.message_id)
+            brancos = analise["brancos"]
+            primeiros = brancos[:10]
+            if primeiros:
+                msg = bot.send_message(chat_id, "⚪ PRIMEIROS 10 BRANCOS MAIS ANTIGOS", reply_markup=montar_botoes_brancos_surfe(brancos, 0, len(primeiros)))
+                surfe_mensagens_abertas[chat_id].append(msg.message_id)
+            if len(brancos) > 10:
+                for inicio_bloco in range(10, len(brancos), 40):
+                    fim_bloco = min(inicio_bloco + 40, len(brancos))
+                    msg = bot.send_message(chat_id, "⚪ DEMAIS BRANCOS — DO MAIS ANTIGO AO MAIS RECENTE", reply_markup=montar_botoes_brancos_surfe(brancos, inicio_bloco, fim_bloco))
+                    surfe_mensagens_abertas[chat_id].append(msg.message_id)
+            msg = bot.send_message(chat_id, f"⚪ TOTAL DE BRANCOS: {len(brancos)}", reply_markup=telebot.types.InlineKeyboardMarkup().add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar")))
+            surfe_mensagens_abertas[chat_id].append(msg.message_id)
+            return
+
+        if caminho not in ("Vermelho", "Preto"):
+            return
+        emoji = "🔴" if caminho == "Vermelho" else "⚫"
+        numeros = range(1, 8) if caminho == "Vermelho" else range(8, 15)
+        faixa = "1 a 7" if caminho == "Vermelho" else "8 a 14"
+        texto = "\n".join([
+            f"{emoji} SURF — ESCOLHA O {caminho.upper()}",
+            "",
+            f"👇 Escolha abaixo o número {caminho} onde você quer iniciar o Surf.",
+            "",
+            f"📊 Ao escolher um número de {faixa}, o bot mostrará todos os registros desse número nas 2.000 rodadas disponíveis mais recentes.",
+            "",
+            "🕐 Os registros estarão organizados do mais antigo para o mais recente, para que a análise respeite a ordem real das rodadas.",
+            "",
+            f"💡 Você poderá escolher qualquer horário desse número para usar aquela rodada como ponto inicial do Surf.",
+            "",
+            f"{emoji} Selecione um número {caminho} abaixo:",
+        ])
+        markup = telebot.types.InlineKeyboardMarkup(row_width=4)
+        botoes = [telebot.types.InlineKeyboardButton(f"{emoji} {n}", callback_data=f"surfe_numero:{n}") for n in numeros]
+        for pos in range(0, len(botoes), 4):
+            markup.row(*botoes[pos:pos+4])
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        msg = bot.send_message(chat_id, texto, reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(msg.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        try: bot.send_message(call.message.chat.id, f"❌ Erro ao abrir o caminho: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_numero:"))
+def surfe_numero_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        numero = int(call.data.split(":", 1)[1])
+        if numero < 1 or numero > 14:
+            return
+        ocorrencias = obter_ocorrencias_numero_surfe(numero)
+        cor = converter_cor(numero)
+        emoji = emoji_cor(cor)
+        if not ocorrencias:
+            bot.send_message(chat_id, f"❌ Não encontrei o número {numero} nas 2.000 rodadas disponíveis mais recentes.")
+            return
+
+        intro = "\n".join([
+            f"{emoji} SURF — NÚMERO {numero}",
+            "",
+            f"👇 Escolha abaixo uma ocorrência do número {numero} para iniciar o SURF.",
+            "",
+            "📚 Base: 2.000 rodadas disponíveis mais recentes.",
+            "",
+            "🕐 Os registros estão organizados do mais antigo para o mais recente.",
+        ])
+        msg = bot.send_message(chat_id, intro)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(msg.message_id)
+
+        primeiros = ocorrencias[:10]
+        if primeiros:
+            msg = bot.send_message(chat_id, f"{emoji} PRIMEIROS 10 NÚMEROS {numero} MAIS ANTIGOS", reply_markup=montar_botoes_numero_surfe(ocorrencias, numero, 0, len(primeiros)))
+            surfe_mensagens_abertas[chat_id].append(msg.message_id)
+
+        if len(ocorrencias) > 10:
+            for inicio_bloco in range(10, len(ocorrencias), 40):
+                fim_bloco = min(inicio_bloco + 40, len(ocorrencias))
+                msg = bot.send_message(chat_id, f"{emoji} DEMAIS NÚMEROS {numero} — DO MAIS ANTIGO AO MAIS RECENTE", reply_markup=montar_botoes_numero_surfe(ocorrencias, numero, inicio_bloco, fim_bloco))
+                surfe_mensagens_abertas[chat_id].append(msg.message_id)
+
+        msg = bot.send_message(chat_id, f"{emoji} TOTAL DE NÚMEROS {numero}: {len(ocorrencias)}", reply_markup=telebot.types.InlineKeyboardMarkup().add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar")))
+        surfe_mensagens_abertas[chat_id].append(msg.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        try: bot.send_message(call.message.chat.id, f"❌ Erro ao listar o número: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception: pass
+
+
+def _buscar_rodadas_recentes_alerta(limite=10):
+    """Busca rodadas diretamente no /history para o monitor ao vivo."""
+    headers = {
+        "accept": "*/*",
+        "accept-language": "pt-BR",
+        "content-type": "application/json",
+        "authorization": f"Bearer {TIPMINER_TOKEN}",
+        "origin": "https://www.tipminer.com",
+        "referer": "https://www.tipminer.com/",
+        "user-agent": "Mozilla/5.0",
+    }
+    params = dict(TIPMINER_PARAMS)
+    params["limit"] = int(limite)
+    resposta = requests.get(TIPMINER_URL, params=params, headers=headers, timeout=15)
+    resposta.raise_for_status()
+    dados = resposta.json()
+    if isinstance(dados, dict):
+        for valor in dados.values():
+            if isinstance(valor, list):
+                dados = valor
+                break
+    if not isinstance(dados, list):
+        return []
+
+    rodadas = []
+    vistos = set()
+    for item in dados:
+        rodada = normalizar_rodada_historica(item)
+        if not rodada:
+            continue
+        rid = rodada.get("rodada_id")
+        if rid in vistos:
+            continue
+        vistos.add(rid)
+        rodadas.append(rodada)
+    return sorted(rodadas, key=_ordem_temporal)
+
+
+def _alertas_caminhos_ativos():
+    with alertas_surfe_lock:
+        modo = alertas_surfe_modo
+    if modo == "Ambos":
+        return ("Vermelho", "Preto")
+    if modo in ("Vermelho", "Preto"):
+        return (modo,)
+    return ()
+
+
+def _alerta_cor_jogada(caminho_nome, pos_relativa):
+    bloco = ((int(pos_relativa) - 1) // 2) % 2
+    if caminho_nome == "Vermelho":
+        return "Vermelho" if bloco == 0 else "Preto"
+    return "Preto" if bloco == 0 else "Vermelho"
+
+
+def _alerta_card_bytes(tipo, gale=0):
+    if tipo == "loss":
+        chave = "loss"
+    elif int(gale) <= 0:
+        chave = "direto"
+    else:
+        chave = f"gale{int(gale)}"
+    bio = io.BytesIO(base64.b64decode(_ALERTA_CARDS_B64[chave]))
+    bio.name = f"{chave}.jpg"
+    return bio
+
+
+
+def _gatilho_nome_nivel(nivel):
+    nivel = int(nivel or 0)
+    return "DIRETO" if nivel <= 0 else f"GALE {nivel}"
+
+def _gatilho_apagar_entrada_anterior():
+    global alertas_gatilho_entrada_message_id
+    if not alertas_gatilho_entrada_message_id:
+        return
+    try:
+        bot.delete_message(ALERTAS_CHAT_ID, alertas_gatilho_entrada_message_id)
+    except Exception:
+        pass
+    alertas_gatilho_entrada_message_id = None
+
+
+def _gatilho_apagar_mensagem(message_id):
+    if not message_id:
+        return
+    try:
+        bot.delete_message(ALERTAS_CHAT_ID, message_id)
+    except Exception:
+        pass
+
+def _gatilho_apagar_status():
+    """Compatibilidade: apaga todos os avisos temporários da nova estratégia."""
+    global alertas_gatilho_status_message_id
+    global alertas_gatilho_espera_message_id, alertas_gatilho_chegando_message_id
+    _gatilho_apagar_mensagem(alertas_gatilho_status_message_id)
+    _gatilho_apagar_mensagem(alertas_gatilho_espera_message_id)
+    _gatilho_apagar_mensagem(alertas_gatilho_chegando_message_id)
+    alertas_gatilho_status_message_id = None
+    alertas_gatilho_espera_message_id = None
+    alertas_gatilho_chegando_message_id = None
+
+def _gatilho_apagar_espera_e_chegando():
+    """Quando o gatilho confirma, as duas mensagens temporárias somem."""
+    global alertas_gatilho_espera_message_id, alertas_gatilho_chegando_message_id
+    _gatilho_apagar_mensagem(alertas_gatilho_espera_message_id)
+    _gatilho_apagar_mensagem(alertas_gatilho_chegando_message_id)
+    alertas_gatilho_espera_message_id = None
+    alertas_gatilho_chegando_message_id = None
+
+def _gatilho_status_espera(nivel):
+    """Esta mensagem permanece até o próximo gatilho realmente confirmar."""
+    global alertas_gatilho_espera_message_id
+    texto = (
+        f"⏳ AGUARDANDO NOVO G{ALERTAS_SURF_GATILHO}\n"
+        f"🎯 PRÓXIMA ENTRADA: {_gatilho_nome_nivel(nivel)}"
+    ).upper()
+    try:
+        if alertas_gatilho_espera_message_id:
+            bot.edit_message_text(texto, ALERTAS_CHAT_ID, alertas_gatilho_espera_message_id)
+            return
+    except Exception:
+        alertas_gatilho_espera_message_id = None
+    try:
+        msg = bot.send_message(ALERTAS_CHAT_ID, texto)
+        alertas_gatilho_espera_message_id = msg.message_id
+    except Exception:
+        traceback.print_exc()
+
+def _gatilho_status_chegando(gale_atual):
+    """Aviso curto: somente caminho chegando + Gale atual."""
+    global alertas_gatilho_chegando_message_id
+    texto = (
+        "⚠️ CAMINHO CHEGANDO\n"
+        f"📍 GALE ATUAL: G{int(gale_atual)}"
+    ).upper()
+    try:
+        if alertas_gatilho_chegando_message_id:
+            bot.edit_message_text(texto, ALERTAS_CHAT_ID, alertas_gatilho_chegando_message_id)
+            return
+    except Exception:
+        alertas_gatilho_chegando_message_id = None
+    try:
+        msg = bot.send_message(ALERTAS_CHAT_ID, texto)
+        alertas_gatilho_chegando_message_id = msg.message_id
+    except Exception:
+        traceback.print_exc()
+
+def _gatilho_status_cancelado():
+    """Cancela apenas o caminho candidato. A mensagem AGUARDANDO continua."""
+    global alertas_gatilho_chegando_message_id
+    texto = "❌ CAMINHO CANCELADO"
+    try:
+        if alertas_gatilho_chegando_message_id:
+            bot.edit_message_text(texto, ALERTAS_CHAT_ID, alertas_gatilho_chegando_message_id)
+            return
+    except Exception:
+        alertas_gatilho_chegando_message_id = None
+    try:
+        msg = bot.send_message(ALERTAS_CHAT_ID, texto)
+        alertas_gatilho_chegando_message_id = msg.message_id
+    except Exception:
+        traceback.print_exc()
+
+def _gatilho_texto_caminho(finalizar=False):
+    with alertas_surfe_lock:
+        itens = list(alertas_gatilho_caminho_resultados)
+
+    if not itens:
+        return None
+
+    resultados = {}
+    for nivel, resultado in itens:
+        resultados[int(nivel)] = resultado
+
+    linhas = [
+        "🎯 SURF — ENTRADA POR GATILHO",
+        "",
+        "📊 CAMINHO DA OPERAÇÃO",
+        "",
+    ]
+
+    if finalizar:
+        # No resultado final mostra DIRETO + todos os Gales até o limite configurado.
+        for nivel in range(0, int(ALERTAS_SURF_STOP_GALE) + 1):
+            resultado = resultados.get(nivel, "❌")
+            linhas.append(f"{resultado} {_gatilho_nome_nivel(nivel)}")
+    else:
+        # Enquanto a operação está aberta, mostra somente o que já aconteceu.
+        for nivel in sorted(resultados):
+            linhas.append(f"{resultados[nivel]} {_gatilho_nome_nivel(nivel)}")
+
+    return "\n".join(linhas)
+
+
+def _gatilho_atualizar_caminho(nivel, resultado, finalizar=False):
+    """Mantém uma única mensagem CAMINHO DA OPERAÇÃO para o ciclo atual."""
+    global alertas_gatilho_caminho_message_id
+
+    nivel = int(nivel)
+    with alertas_surfe_lock:
+        atualizado = False
+        for i, (n, _) in enumerate(alertas_gatilho_caminho_resultados):
+            if int(n) == nivel:
+                alertas_gatilho_caminho_resultados[i] = (nivel, resultado)
+                atualizado = True
+                break
+        if not atualizado:
+            alertas_gatilho_caminho_resultados.append((nivel, resultado))
+        alertas_gatilho_caminho_resultados.sort(key=lambda item: int(item[0]))
+
+    texto = _gatilho_texto_caminho(finalizar=finalizar)
+    if not texto:
+        return
+
+    try:
+        if alertas_gatilho_caminho_message_id:
+            bot.edit_message_text(
+                texto.upper(),
+                ALERTAS_CHAT_ID,
+                alertas_gatilho_caminho_message_id,
+            )
+            return
+    except Exception:
+        alertas_gatilho_caminho_message_id = None
+
+    try:
+        msg = bot.send_message(ALERTAS_CHAT_ID, texto.upper())
+        alertas_gatilho_caminho_message_id = msg.message_id
+    except Exception:
+        traceback.print_exc()
+
+
+def _gatilho_enviar_placar(resultado):
+    global alertas_gatilho_total_greens, alertas_gatilho_total_loss
+    if resultado == "green":
+        alertas_gatilho_total_greens += 1
+    else:
+        alertas_gatilho_total_loss += 1
+    total = alertas_gatilho_total_greens + alertas_gatilho_total_loss
+    taxa = (alertas_gatilho_total_greens / total * 100) if total else 0
+    taxa_txt = f"{taxa:.1f}".replace(".", ",")
+    bot.send_message(ALERTAS_CHAT_ID, (
+        "📊 RESULTADO DOS SINAIS\n\n"
+        f"✅ GREENS: {alertas_gatilho_total_greens}\n"
+        f"❌ LOSS: {alertas_gatilho_total_loss}\n"
+        f"🎯 TOTAL DE OPERAÇÕES: {total}\n"
+        f"📈 TAXA DE GREEN: {taxa_txt}%\n\n"
+        "━━━━━━━━━━━━━━━━━━"
+    ))
+    # Mensagem invisível separada para criar espaço real entre o placar e o próximo balão.
+    try:
+        bot.send_message(ALERTAS_CHAT_ID, "\u2063")
+    except Exception:
+        pass
+
+
+def _gatilho_finalizar_ciclo_visual():
+    """Deixa as mensagens finais no canal e prepara um ciclo novo."""
+    global alertas_gatilho_caminho_message_id, alertas_gatilho_entrada_message_id
+    global alertas_gatilho_caminho_resultados, alertas_gatilho_prealerta
+
+    with alertas_surfe_lock:
+        alertas_gatilho_caminho_resultados = []
+
+    # Não apagamos essas mensagens no Telegram.
+    # Apenas soltamos os IDs para a próxima operação criar mensagens novas.
+    alertas_gatilho_caminho_message_id = None
+    alertas_gatilho_entrada_message_id = None
+    alertas_gatilho_prealerta = None
+
+
+def _alerta_resumo_stats():
+    with alertas_surfe_lock:
+        st = {
+            "green": alertas_surfe_stats["green"],
+            "loss": alertas_surfe_stats["loss"],
+            "direto": alertas_surfe_stats["direto"],
+            "gales": dict(alertas_surfe_stats["gales"]),
+        }
+    total = st["green"] + st["loss"]
+    if total <= 0:
+        return "📊 RESULTADO DOS SINAIS\n✅ GREEN: 0\n🚨 LOSS: 0"
+
+    def pct(v):
+        return (v / total * 100.0) if total else 0.0
+
+    linhas = [
+        "📊 RESULTADO DOS SINAIS",
+        f"✅ GREEN: {st['green']}",
+        f"🚨 LOSS: {st['loss']}",
+        f"🎯 Aproveitamento: {pct(st['green']):.1f}%",
+        "",
+        "📈 ONDE BATEU",
+        f"🎯 Direto: {st['direto']} — {pct(st['direto']):.1f}%",
+    ]
+    for n in range(1, ALERTAS_SURF_STOP_GALE + 1):
+        linhas.append(
+            f"{_emoji_numero_gale(n)} Gale {n}: {st['gales'].get(n, 0)} — {pct(st['gales'].get(n, 0)):.1f}%"
+        )
+    linhas.append(f"🚨 LOSS: {st['loss']} — {pct(st['loss']):.1f}%")
+    return "\n".join(linhas)
+
+
+def _alerta_nome_surfe(caminho_nome):
+    if caminho_nome == "Vermelho":
+        return "🔴 SURF 2 VERMELHOS"
+    return "⚫ SURF 2 PRETOS"
+
+
+def _alerta_identificacao_rodada(rodada):
+    data, hora = formatar_data_hora(rodada.get("instant"), rodada.get("tempo"))
+    cor = normalizar_cor_analise(rodada)
+    return data, hora, cor, rodada.get("numero", "?")
+
+
+def _alerta_enviar_sinal(caminho_nome, ponto, gatilho, entrada_cor, chave):
+    _, _, cor_ultima, numero = _alerta_identificacao_rodada(gatilho)
+
+    with alertas_surfe_lock:
+        op_atual = alertas_surfe_operacoes.get(chave) or {}
+    if op_atual.get("modo") == "entrada_gatilho":
+        _gatilho_apagar_espera_e_chegando()
+        _gatilho_apagar_entrada_anterior()
+    with alertas_surfe_lock:
+        caminho_ao_vivo_marcas[(gatilho.get("rodada_id"), caminho_nome)] = "🎯 ENTRADA"
+    referencia = "BRANCO" if str(numero) == "0" else str(numero)
+
+    registro_id = _alerta_registrar_sinal(
+        origem="SURF",
+        caminho_nome=caminho_nome,
+        gale=ALERTAS_SURF_GATILHO,
+        inicio=ponto,
+        gatilho=gatilho,
+    )
+    if registro_id is not None:
+        with alertas_surfe_lock:
+            operacao = alertas_surfe_operacoes.get(chave)
+            if operacao is not None:
+                operacao["registro_sinal_id"] = registro_id
+                alertas_surfe_operacoes[chave] = operacao
+
+    chat_cfg = _chat_textos_ativo()
+    if op_atual.get("modo") == "entrada_gatilho":
+        nivel = int(op_atual.get("gale_aposta", 0))
+        global alertas_gatilho_entrada_message_id
+        msg_entrada = bot.send_message(ALERTAS_CHAT_ID, "\n".join([
+            "🎯 ENTRADA CONFIRMADA", "",
+            f"🔥 GATILHO: G{ALERTAS_SURF_GATILHO}",
+            f"🏄 {_alerta_nome_surfe(caminho_nome)}",
+            f"🎯 {_gatilho_nome_nivel(nivel)}",
+            f"➡️ ENTRADA PARA {emoji_cor(entrada_cor)} {entrada_cor.upper()}",
+            f"📍 DEPOIS DO NÚMERO {referencia} {emoji_cor(cor_ultima)}",
+        ]).upper())
+        alertas_gatilho_entrada_message_id = msg_entrada.message_id
+    elif chat_cfg is None:
+        bot.send_message(ALERTAS_CHAT_ID, "\n".join([
+            "🎯 SINAL CONFIRMADO", "",
+            f"🎯 ENTRADA PARA {emoji_cor(entrada_cor)} {entrada_cor.upper()}",
+            f"➡️ DEPOIS DO NÚMERO {referencia} {emoji_cor(cor_ultima)}",
+        ]))
+    else:
+        bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+            chat_cfg, "sinal",
+            GALE_GATILHO=f"G{ALERTAS_SURF_GATILHO}",
+            COR_ULTIMA=emoji_cor(cor_ultima),
+            NUMERO_ULTIMA=referencia,
+            COR_ENTRADA=f"{emoji_cor(entrada_cor)} {entrada_cor.upper()}",
+            SURF=_alerta_nome_surfe(caminho_nome),
+        ))
+
+
+
+def _alerta_finalizar_green(chave, operacao, rodada, gale):
+    data, hora, cor, numero = _alerta_identificacao_rodada(rodada)
+    with alertas_surfe_lock:
+        alertas_surfe_stats["green"] += 1
+        if gale == 0:
+            alertas_surfe_stats["direto"] += 1
+        else:
+            alertas_surfe_stats["gales"][gale] = alertas_surfe_stats["gales"].get(gale, 0) + 1
+        alertas_surfe_operacoes.pop(chave, None)
+
+    onde = "DIRETO" if gale == 0 else f"G{gale}"
+
+    if operacao.get("modo") == "entrada_gatilho":
+        _gatilho_apagar_espera_e_chegando()
+        _gatilho_atualizar_caminho(gale, "✅", finalizar=True)
+        _alerta_atualizar_registro_sinal(
+            operacao.get("registro_sinal_id"),
+            f"✅ GREEN — {onde}"
+        )
+        _gatcfg_enviar_imagem_resultado("green", gale)
+        _gatilho_enviar_placar("green")
+        _relatorio_registrar("gatilho", "green", gale, ALERTAS_SURF_STOP_GALE)
+        _gatilho_finalizar_ciclo_visual()
+        return
+
+    _alerta_atualizar_registro_sinal(
+        operacao.get("registro_sinal_id"),
+        f"✅ GREEN — {onde}"
+    )
+    chat_cfg = _chat_textos_ativo()
+    if chat_cfg is None:
+        chat_cfg = 0
+        topo = f"✅ GREEN\n\n🏆 GREEN {onde}"
+    else:
+        topo = _render_texto_canal(chat_cfg, "green", RESULTADO_GALE=onde)
+    bot.send_message(ALERTAS_CHAT_ID, topo)
+
+    if chat_cfg:
+        _enviar_imagem_resultado(chat_cfg, "green", gale)
+    else:
+        bot.send_photo(ALERTAS_CHAT_ID, _alerta_card_bytes("green", gale))
+
+    registro = "\n".join([
+        "📊 REGISTRO DA OPERAÇÃO",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        f"🎲 ENTRADA: {emoji_cor(operacao['entrada_cor'])} {operacao['entrada_cor'].upper()}",
+        f"🎯 CONFIRMAÇÃO: {onde}",
+        "🏁 RESULTADO: GREEN ✅",
+        f"🎲 SAIU: {emoji_cor(cor)} {numero}",
+        f"📅 DATA: {data}",
+        f"🕐 HORÁRIO: {hora}",
+        "",
+        _alerta_resumo_stats().upper(),
+    ])
+    bot.send_message(ALERTAS_CHAT_ID, registro.upper())
+
+    _relatorio_registrar("surf", "green", gale, ALERTAS_SURF_STOP_GALE)
+
+
+
+def _alerta_finalizar_loss(chave, operacao, rodada):
+    data, hora, cor, numero = _alerta_identificacao_rodada(rodada)
+    with alertas_surfe_lock:
+        alertas_surfe_stats["loss"] += 1
+        alertas_surfe_operacoes.pop(chave, None)
+
+    if operacao.get("modo") == "entrada_gatilho":
+        gale_loss = int(operacao.get("gale_aposta", ALERTAS_SURF_STOP_GALE))
+        _gatilho_apagar_espera_e_chegando()
+        _gatilho_atualizar_caminho(gale_loss, "❌", finalizar=True)
+        _alerta_atualizar_registro_sinal(
+            operacao.get("registro_sinal_id"),
+            f"🚨 LOSS — STOP G{ALERTAS_SURF_STOP_GALE}"
+        )
+        _gatcfg_enviar_imagem_resultado("loss")
+        _gatilho_enviar_placar("loss")
+        _relatorio_registrar("gatilho", "loss", gale_loss, ALERTAS_SURF_STOP_GALE)
+        _gatilho_finalizar_ciclo_visual()
+        return
+
+    _alerta_atualizar_registro_sinal(
+        operacao.get("registro_sinal_id"),
+        f"🚨 LOSS — STOP G{ALERTAS_SURF_STOP_GALE}"
+    )
+    limite = f"G{ALERTAS_SURF_STOP_GALE}"
+    chat_cfg = _chat_textos_ativo()
+    if chat_cfg is None:
+        chat_cfg = 0
+        topo = f"❌ LOSS\n\n🛑 OPERAÇÃO FINALIZADA NO {limite}"
+    else:
+        topo = _render_texto_canal(chat_cfg, "loss", LIMITE_GALE=limite)
+    bot.send_message(ALERTAS_CHAT_ID, topo)
+
+    # LOSS também possui cartão/imagem em alta qualidade, separado do texto.
+    if chat_cfg:
+        _enviar_imagem_resultado(chat_cfg, "loss")
+    else:
+        bot.send_photo(ALERTAS_CHAT_ID, _alerta_card_bytes("loss"))
+
+    registro = "\n".join([
+        "📊 REGISTRO DA OPERAÇÃO",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        f"🎲 ENTRADA: {emoji_cor(operacao['entrada_cor'])} {operacao['entrada_cor'].upper()}",
+        f"🎯 LIMITE: {limite}",
+        "🏁 RESULTADO: LOSS ❌",
+        f"🎲 ÚLTIMA RODADA: {emoji_cor(cor)} {numero}",
+        f"📅 DATA: {data}",
+        f"🕐 HORÁRIO: {hora}",
+        "",
+        _alerta_resumo_stats().upper(),
+    ])
+    bot.send_message(ALERTAS_CHAT_ID, registro.upper())
+
+
+    _relatorio_registrar("surf", "loss", ALERTAS_SURF_STOP_GALE, ALERTAS_SURF_STOP_GALE)
+
+
+def _alerta_processar_operacoes(rodada):
+    """Processa SURF normal ou a progressão ENTRE GATILHOS."""
+    global alertas_gatilho_nivel_aposta
+    with alertas_surfe_lock:
+        itens = list(alertas_surfe_operacoes.items())
+    if not itens:
+        return
+    chave, operacao = itens[0]
+    saiu = normalizar_cor_analise(rodada)
+    gale_atual = int(operacao.get("gale_aposta", 0))
+    if saiu == operacao["entrada_cor"]:
+        _alerta_finalizar_green(chave, operacao, rodada, gale_atual)
+        if operacao.get("modo") == "entrada_gatilho":
+            alertas_gatilho_nivel_aposta = 0
+        return
+
+    if operacao.get("modo") == "entrada_gatilho":
+        # Nesta modalidade uma perda NÃO gera aposta na rodada seguinte.
+        # O próximo nível só será usado quando surgir OUTRO Gale-gatilho.
+        with alertas_surfe_lock:
+            alertas_surfe_operacoes.pop(chave, None)
+
+        if gale_atual >= ALERTAS_SURF_STOP_GALE:
+            _alerta_finalizar_loss(chave, operacao, rodada)
+            alertas_gatilho_nivel_aposta = 0
+            return
+
+        _gatilho_apagar_espera_e_chegando()
+        _gatilho_atualizar_caminho(gale_atual, "❌")
+        alertas_gatilho_nivel_aposta = gale_atual + 1
+        _gatilho_status_espera(alertas_gatilho_nivel_aposta)
+        return
+
+    if gale_atual >= ALERTAS_SURF_STOP_GALE:
+        _alerta_finalizar_loss(chave, operacao, rodada)
+        return
+    novo_gale = gale_atual + 1
+    operacao["gale_aposta"] = novo_gale
+    with alertas_surfe_lock:
+        if chave in alertas_surfe_operacoes:
+            alertas_surfe_operacoes[chave] = operacao
+    chat_cfg = _chat_textos_ativo()
+    if chat_cfg is None:
+        bot.send_message(ALERTAS_CHAT_ID, f"❌ NÃO BATEU\n\n🔥 VAMOS PARA O G{novo_gale}")
+    else:
+        bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(chat_cfg, "gales", GALE=f"G{novo_gale}"))
+
+
+def _alerta_estado_final_caminho(dados, indice_inicio, caminho_nome):
+    """Retorna o Gale atual no fim do caminho e a próxima cor do padrão SURF."""
+    gale_atual = 0
+    total_depois = len(dados) - indice_inicio - 1
+    if total_depois <= 0:
+        return 0, _alerta_cor_jogada(caminho_nome, 1)
+
+    for pos_relativa, rodada in enumerate(dados[indice_inicio + 1:], 1):
+        saiu = normalizar_cor_analise(rodada)
+        jogaria = _alerta_cor_jogada(caminho_nome, pos_relativa)
+        if saiu == jogaria:
+            gale_atual = 0
+        else:
+            gale_atual += 1
+
+    proxima_cor = _alerta_cor_jogada(caminho_nome, total_depois + 1)
+    return gale_atual, proxima_cor
+
+
+def _alerta_assinatura_caminho_atual(dados, indice_inicio, caminho_nome):
+    """Assinatura do Gale aberto no fim do caminho, usando as rodadas reais desde o G1."""
+    gale_atual = 0
+    indice_g1 = None
+
+    for pos_relativa, rodada in enumerate(dados[indice_inicio + 1:], 1):
+        indice_abs = indice_inicio + pos_relativa
+        saiu = normalizar_cor_analise(rodada)
+        jogaria = _alerta_cor_jogada(caminho_nome, pos_relativa)
+
+        if saiu == jogaria:
+            gale_atual = 0
+            indice_g1 = None
+        else:
+            gale_atual += 1
+            if gale_atual == 1:
+                indice_g1 = indice_abs
+
+    if gale_atual <= 0 or indice_g1 is None:
+        return None
+
+    assinatura = []
+    for idx_abs in range(indice_g1, len(dados)):
+        r = dados[idx_abs]
+        assinatura.append((
+            str(r.get("rodada_id") or r.get("instant") or r.get("tempo") or ""),
+            str(r.get("numero")),
+            normalizar_cor_analise(r),
+        ))
+
+    return (caminho_nome, tuple(assinatura))
+
+
+
+def _alerta_procurar_entrada_por_gatilho(dados, indice_ativacao, caminhos):
+    """Fluxo visual:
+    - AGUARDANDO NOVO Gx permanece após uma perda.
+    - Quando um candidato se aproxima: CAMINHO CHEGANDO + Gale atual.
+    - Se quebrar: CAMINHO CANCELADO; AGUARDANDO continua.
+    - Se confirmar: apaga AGUARDANDO + CHEGANDO e envia ENTRADA CONFIRMADA.
+    """
+    global alertas_gatilho_prealerta
+
+    ultima = dados[-1]
+    alvo = int(ALERTAS_SURF_GATILHO)
+    aviso_antes = int(ALERTAS_SURF_AVISO_ANTES or 0)
+    aviso_inicio = max(1, alvo - aviso_antes) if aviso_antes > 0 else None
+
+    pre = dict(alertas_gatilho_prealerta) if alertas_gatilho_prealerta else None
+
+    # Já existe um candidato sendo acompanhado.
+    if pre:
+        indice_inicio = next(
+            (i for i, r in enumerate(dados) if r.get("rodada_id") == pre.get("ponto_id")),
+            None
+        )
+        if indice_inicio is None:
+            alertas_gatilho_prealerta = None
+            _gatilho_status_cancelado()
+            return
+
+        gale_atual, proxima_cor = _alerta_estado_final_caminho(
+            dados, indice_inicio, pre["caminho"]
+        )
+
+        # O caminho que vinha chegando quebrou.
+        if gale_atual == 0:
+            alertas_gatilho_prealerta = None
+            _gatilho_status_cancelado()
+            return
+
+        # Enquanto se aproxima, mostra somente CAMINHO CHEGANDO + Gale atual.
+        if gale_atual < alvo:
+            if pre.get("ultimo_gale") != gale_atual:
+                pre["ultimo_gale"] = gale_atual
+                alertas_gatilho_prealerta = pre
+                _gatilho_status_chegando(gale_atual)
+            return
+
+        # Gatilho confirmado: a oportunidade imediatamente seguinte é a entrada.
+        assinatura_unica = _alerta_assinatura_caminho_atual(
+            dados, indice_inicio, pre["caminho"]
+        )
+        if assinatura_unica is None:
+            return
+
+        if assinatura_unica in alertas_surfe_caminhos_unicos_emitidos:
+            alertas_gatilho_prealerta = None
+            _gatilho_status_cancelado()
+            return
+
+        ponto = dados[indice_inicio]
+        chave = ("GATILHO", pre["caminho"], ponto.get("rodada_id"), ultima.get("rodada_id"))
+        operacao = {
+            "modo": "entrada_gatilho",
+            "caminho": pre["caminho"],
+            "ponto_id": ponto.get("rodada_id"),
+            "gatilho_id": ultima.get("rodada_id"),
+            "entrada_cor": proxima_cor,
+            "gale_aposta": int(alertas_gatilho_nivel_aposta),
+            "assinatura_unica": assinatura_unica,
+        }
+
+        with alertas_surfe_lock:
+            if alertas_surfe_operacoes:
+                return
+            alertas_surfe_caminhos_unicos_emitidos.add(assinatura_unica)
+            alertas_surfe_operacoes[chave] = operacao
+
+        alertas_gatilho_prealerta = None
+        _gatilho_apagar_espera_e_chegando()
+        _alerta_enviar_sinal(pre["caminho"], ponto, ultima, proxima_cor, chave)
+        return
+
+    # Sem aviso prévio: o próprio Gale de gatilho é acompanhado sem mensagem CAMINHO CHEGANDO.
+    if aviso_antes <= 0:
+        aviso_inicio = alvo
+
+    # Ainda sem candidato: procura um caminho que chegou ao ponto de aviso.
+    for caminho_nome in caminhos:
+        for indice_inicio in range(indice_ativacao, len(dados) - 1):
+            gale_atual, _ = _alerta_estado_final_caminho(
+                dados, indice_inicio, caminho_nome
+            )
+            if gale_atual != aviso_inicio:
+                continue
+
+            ponto = dados[indice_inicio]
+            alertas_gatilho_prealerta = {
+                "caminho": caminho_nome,
+                "ponto_id": ponto.get("rodada_id"),
+                "ultimo_gale": gale_atual,
+            }
+            if aviso_antes > 0:
+                _gatilho_status_chegando(gale_atual)
+            return
+
+
+def _alerta_procurar_novos_g9():
+    """Procura o Gale configurado. O nome antigo é mantido para não mexer no restante."""
+    global alertas_surfe_prealerta
+
+    with alertas_surfe_lock:
+        dados = list(alertas_surfe_historico)
+        ativo = alertas_surfe_ativos
+        caminhos = _alertas_caminhos_ativos()
+        inicio_id = alertas_surfe_inicio_monitor_id
+        tem_operacao = bool(alertas_surfe_operacoes)
+        pre = dict(alertas_surfe_prealerta) if alertas_surfe_prealerta else None
+
+    if not ativo or not inicio_id or len(dados) < 2 or tem_operacao:
+        return
+
+    indice_ativacao = next(
+        (i for i, r in enumerate(dados) if r.get("rodada_id") == inicio_id),
+        None
+    )
+    if indice_ativacao is None:
+        return
+
+    if ALERTAS_MODO_ESTRATEGIA == "entrada_gatilho":
+        _alerta_procurar_entrada_por_gatilho(dados, indice_ativacao, caminhos)
+        return
+
+    ultima = dados[-1]
+    alvo = int(ALERTAS_SURF_GATILHO)
+    aviso_antes = max(0, int(ALERTAS_SURF_AVISO_ANTES))
+    gale_para_sinal = max(1, alvo - 1)
+    gale_para_aviso = max(1, alvo - aviso_antes)
+
+    # Já existe um caminho sendo acompanhado.
+    if pre:
+        indice_inicio = next(
+            (i for i, r in enumerate(dados) if r.get("rodada_id") == pre["ponto_id"]),
+            None
+        )
+        if indice_inicio is None:
+            with alertas_surfe_lock:
+                alertas_surfe_prealerta = None
+            return
+
+        gale_atual, proxima_cor = _alerta_estado_final_caminho(
+            dados, indice_inicio, pre["caminho"]
+        )
+
+        # O caminho acertou antes do alvo.
+        if gale_atual == 0:
+            ultimo_gale = pre.get("ultimo_gale")
+            with alertas_surfe_lock:
+                alertas_surfe_prealerta = None
+
+            chat_cfg = _chat_textos_ativo()
+            gale_cancelado = f"G{ultimo_gale}" if ultimo_gale else "ANTES DO GATILHO"
+            if chat_cfg is None:
+                bot.send_message(ALERTAS_CHAT_ID, "🚫 CAMINHO CANCELADO")
+            else:
+                bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+                    chat_cfg, "cancelado",
+                    SURF=_alerta_nome_surfe(pre["caminho"]),
+                    GALE_ATUAL=gale_cancelado,
+                    GALE_GATILHO=f"G{alvo}",
+                ))
+            return
+
+        # Chegou ao ponto em que a PRÓXIMA oportunidade é o Gale de gatilho.
+        if gale_atual >= gale_para_sinal:
+            assinatura_unica = _alerta_assinatura_caminho_atual(
+                dados, indice_inicio, pre["caminho"]
+            )
+            ponto = dados[indice_inicio]
+            chave = (pre["caminho"], pre["ponto_id"])
+            operacao = {
+                "caminho": pre["caminho"],
+                "ponto_id": pre["ponto_id"],
+                "gatilho_id": ultima.get("rodada_id"),
+                "entrada_cor": proxima_cor,
+                "gale_aposta": 0,
+                "assinatura_unica": assinatura_unica,
+            }
+
+            with alertas_surfe_lock:
+                if alertas_surfe_operacoes:
+                    return
+                if assinatura_unica in alertas_surfe_caminhos_unicos_emitidos:
+                    alertas_surfe_prealerta = None
+                    return
+                if assinatura_unica is not None:
+                    alertas_surfe_caminhos_unicos_emitidos.add(assinatura_unica)
+                alertas_surfe_prealerta = None
+                alertas_surfe_operacoes[chave] = operacao
+
+            _alerta_enviar_sinal(
+                pre["caminho"], ponto, ultima, proxima_cor, chave
+            )
+            return
+
+        # Atualização intermediária do caminho (ex.: G10 -> G11).
+        ultimo_gale = int(pre.get("ultimo_gale") or 0)
+        if gale_atual > ultimo_gale:
+            with alertas_surfe_lock:
+                if alertas_surfe_prealerta:
+                    alertas_surfe_prealerta["ultimo_gale"] = gale_atual
+
+            if aviso_antes > 0:
+                with alertas_surfe_lock:
+                    caminho_ao_vivo_marcas[(ultima.get("rodada_id"), pre["caminho"])] = "➡️ AVISO"
+                chat_cfg = _chat_textos_ativo()
+                if chat_cfg is None:
+                    bot.send_message(
+                        ALERTAS_CHAT_ID,
+                        f"⚠️ CAMINHO ÚNICO CHEGANDO\n\n"
+                        f"🔥 GALE DE GATILHO: G{alvo}\n"
+                        f"📍 GALE ATUAL: G{gale_atual}"
+                    )
+                else:
+                    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+                        chat_cfg, "chegando",
+                        SURF=_alerta_nome_surfe(pre["caminho"]),
+                        GALE_ATUAL=f"G{gale_atual}",
+                        GALE_GATILHO=f"G{alvo}",
+                    ))
+        return
+
+    # Ainda não há caminho em acompanhamento.
+    for caminho_nome in caminhos:
+        for indice_inicio in range(indice_ativacao, len(dados) - 1):
+            gale_atual, proxima_cor = _alerta_estado_final_caminho(
+                dados, indice_inicio, caminho_nome
+            )
+
+            # Sem aviso prévio: sinaliza assim que a próxima oportunidade for o alvo.
+            if aviso_antes == 0 and gale_atual == gale_para_sinal:
+                ponto = dados[indice_inicio]
+                assinatura_unica = _alerta_assinatura_caminho_atual(
+                    dados, indice_inicio, caminho_nome
+                )
+                chave = (caminho_nome, ponto.get("rodada_id"))
+                operacao = {
+                    "caminho": caminho_nome,
+                    "ponto_id": ponto.get("rodada_id"),
+                    "gatilho_id": ultima.get("rodada_id"),
+                    "entrada_cor": proxima_cor,
+                    "gale_aposta": 0,
+                    "assinatura_unica": assinatura_unica,
+                }
+
+                with alertas_surfe_lock:
+                    if alertas_surfe_operacoes or alertas_surfe_prealerta:
+                        return
+                    if assinatura_unica in alertas_surfe_caminhos_unicos_emitidos:
+                        continue
+                    if assinatura_unica is not None:
+                        alertas_surfe_caminhos_unicos_emitidos.add(assinatura_unica)
+                    alertas_surfe_operacoes[chave] = operacao
+
+                _alerta_enviar_sinal(
+                    caminho_nome, ponto, ultima, proxima_cor, chave
+                )
+                return
+
+            # Com aviso: começa a acompanhar no Gale configurado para o pré-alerta.
+            if aviso_antes > 0 and gale_atual == gale_para_aviso:
+                ponto = dados[indice_inicio]
+                with alertas_surfe_lock:
+                    if alertas_surfe_operacoes or alertas_surfe_prealerta:
+                        return
+                    alertas_surfe_prealerta = {
+                        "caminho": caminho_nome,
+                        "ponto_id": ponto.get("rodada_id"),
+                        "ultimo_gale": gale_atual,
+                    }
+
+                with alertas_surfe_lock:
+                    caminho_ao_vivo_marcas[(ultima.get("rodada_id"), caminho_nome)] = "➡️ AVISO"
+                chat_cfg = _chat_textos_ativo()
+                if chat_cfg is None:
+                    bot.send_message(
+                        ALERTAS_CHAT_ID,
+                        f"⚠️ CAMINHO ÚNICO CHEGANDO\n\n"
+                        f"🔥 GALE DE GATILHO: G{alvo}\n"
+                        f"📍 GALE ATUAL: G{gale_atual}"
+                    )
+                else:
+                    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+                        chat_cfg, "chegando",
+                        SURF=_alerta_nome_surfe(caminho_nome),
+                        GALE_ATUAL=f"G{gale_atual}",
+                        GALE_GATILHO=f"G{alvo}",
+                    ))
+                return
+
+
+def _caminho_ao_vivo_todas_rodadas():
+    """Todas as rodadas novas desde a ativação, em ordem cronológica."""
+    with alertas_surfe_lock:
+        dados = list(alertas_surfe_historico)
+        inicio_id = alertas_surfe_inicio_monitor_id
+    if not dados or not inicio_id:
+        return []
+    idx = next((i for i, r in enumerate(dados) if r.get("rodada_id") == inicio_id), None)
+    if idx is None:
+        return []
+    return dados[idx + 1:]
+
+
+def _caminho_ao_vivo_linha(posicao, rodada, caminho_nome, gale_anterior):
+    saiu = normalizar_cor_analise(rodada)
+    jogaria = _alerta_cor_jogada(caminho_nome, posicao)
+    numero = rodada.get("numero")
+    if saiu == jogaria:
+        gale = 0
+        resultado = "✅"
+    else:
+        gale = gale_anterior + 1
+        resultado = f"❌G{gale}"
+
+    with alertas_surfe_lock:
+        marca = caminho_ao_vivo_marcas.get((rodada.get("rodada_id"), caminho_nome), "")
+
+    sufixo = f"  {marca}" if marca else ""
+    return (
+        f"{posicao:>2}  {emoji_cor(saiu)}{numero} - "
+        f"{emoji_cor(jogaria)}{resultado}{sufixo}"
+    ), gale
+
+
+def _caminho_ao_vivo_texto():
+    with alertas_surfe_lock:
+        ativo = alertas_surfe_ativos
+        modo = alertas_surfe_modo
+        dados = list(alertas_surfe_historico)
+        inicio_id = alertas_surfe_inicio_monitor_id
+
+    if not ativo:
+        return (
+            "📡 CAMINHO AO VIVO\n\n"
+            "🔴 Monitor desativado.\n"
+            "Configure e ative uma estratégia para acompanhar."
+        )
+
+    inicio = next((r for r in dados if r.get("rodada_id") == inicio_id), None)
+    if inicio is None:
+        return "📡 CAMINHO AO VIVO\n\n⏳ Aguardando referência inicial..."
+
+    data_inicio, hora_inicio = formatar_data_hora(
+        inicio.get("instant"), inicio.get("tempo")
+    )
+    cor_inicio = normalizar_cor_analise(inicio)
+    numero_inicio = inicio.get("numero")
+
+    linhas = [
+        "📡 CAMINHO AO VIVO",
+        "",
+        "🟢 INÍCIO DO CAMINHO",
+        f"🎲 Rodada inicial: {emoji_cor(cor_inicio)} {numero_inicio}",
+        f"📅 Data: {data_inicio}",
+        f"🕐 Horário: {hora_inicio}",
+        "",
+    ]
+
+    todas = _caminho_ao_vivo_todas_rodadas()
+    if not todas:
+        linhas.append("⏳ Aguardando a primeira rodada nova...")
+        return "\n".join(linhas)
+
+    # Calcula desde a rodada 1 para preservar o Gale correto mesmo quando
+    # as primeiras linhas já tiverem sido descartadas da janela de 99.
+    inicio_visivel = max(1, len(todas) - CAMINHO_AO_VIVO_LIMITE + 1)
+    caminhos = _alertas_caminhos_ativos()
+
+    if caminhos == ("Vermelho", "Preto") or caminhos == ("Preto", "Vermelho"):
+        linhas += [
+            "🏄 SURF ⚫ — ⚫⚫ primeiro    |    🏄 SURF 🔴 — 🔴🔴 primeiro",
+            "",
+        ]
+        gp = gv = 0
+        visiveis = []
+        for posicao, rodada in enumerate(todas, 1):
+            lp, gp = _caminho_ao_vivo_linha(posicao, rodada, "Preto", gp)
+            lv, gv = _caminho_ao_vivo_linha(posicao, rodada, "Vermelho", gv)
+            if posicao >= inicio_visivel:
+                visiveis.append(f"{lp}    |    {lv}")
+        linhas.extend(visiveis)
+    else:
+        caminho = caminhos[0] if caminhos else "Vermelho"
+        linhas.append(
+            "🏄 SURF ⚫ — ⚫⚫ primeiro"
+            if caminho == "Preto"
+            else "🏄 SURF 🔴 — 🔴🔴 primeiro"
+        )
+        linhas.append("")
+        gale = 0
+        visiveis = []
+        for posicao, rodada in enumerate(todas, 1):
+            linha, gale = _caminho_ao_vivo_linha(posicao, rodada, caminho, gale)
+            if posicao >= inicio_visivel:
+                visiveis.append(linha)
+        linhas.extend(visiveis)
+
+    linhas += [
+        "",
+        f"📚 Exibindo {min(len(todas), CAMINHO_AO_VIVO_LIMITE)} "
+        f"das {len(todas)} rodada(s) do caminho."
+    ]
+    return "\n".join(linhas)
+
+
+def _caminho_ao_vivo_markup():
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton(
+            "🔄 ATUALIZAR",
+            callback_data="caminho_ao_vivo_atualizar"
+        )
+    )
+    return markup
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "caminho_ao_vivo")
+def caminho_ao_vivo_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        call.message.chat.id,
+        _caminho_ao_vivo_texto(),
+        reply_markup=_caminho_ao_vivo_markup()
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "caminho_ao_vivo_atualizar")
+def caminho_ao_vivo_atualizar_callback(call):
+    bot.answer_callback_query(call.id, "🔄 Atualizado")
+    try:
+        bot.edit_message_text(
+            _caminho_ao_vivo_texto(),
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=_caminho_ao_vivo_markup()
+        )
+    except Exception:
+        pass
+
+
+def _alerta_texto_status_monitor():
+    """Monta um status curto sem alterar a lógica dos sinais G9."""
+    with alertas_surfe_lock:
+        ativo = alertas_surfe_ativos
+        modo = alertas_surfe_modo
+        rodada = dict(alertas_surfe_ultima_rodada_detectada) if alertas_surfe_ultima_rodada_detectada else None
+        atraso = alertas_surfe_ultimo_atraso
+        total_novas = alertas_surfe_total_novas
+        operacoes = len(alertas_surfe_operacoes)
+
+    nomes = {
+        "Preto": "⚫ SURF 2 PRETOS",
+        "Vermelho": "🔴 SURF 2 VERMELHOS",
+        "Ambos": "⚫ SURF 2 PRETOS + 🔴 SURF 2 VERMELHOS",
+    }
+    linhas = [
+        f"📡 STATUS DO MONITOR G{ALERTAS_SURF_GATILHO}",
+        "",
+        f"🟢 Monitor: {'ATIVO' if ativo else 'DESATIVADO'}",
+        f"🏄 Modo: {nomes.get(modo, modo or 'não definido')}",
+        f"🔢 Rodadas novas detectadas: {total_novas}",
+        f"🎯 Sinal em andamento: {'SIM' if operacoes else 'NÃO'}",
+    ]
+
+    if rodada:
+        data, hora = formatar_data_hora(rodada.get("instant"), rodada.get("tempo"))
+        cor = normalizar_cor_analise(rodada)
+        linhas += [
+            "",
+            f"🎲 Última rodada lida: {emoji_cor(cor)} {rodada.get('numero')}",
+            f"📅 {data}",
+            f"🕐 Horário da rodada: {hora}",
+        ]
+        if atraso is not None:
+            linhas.append(f"⚡ Detectada em: {atraso:.1f}s após o horário da rodada")
+    else:
+        linhas += ["", "⏳ Aguardando a primeira rodada nova após a ativação."]
+
+    linhas += ["", "✅ Este aviso confirma que o monitor continua funcionando."]
+    return "\n".join(linhas)
+
+
+
+def _alerta_referencia_rodada(rodada):
+    """Cor + número + data/hora; referência curta para localizar nos Registros Online."""
+    if not rodada:
+        return "indisponível"
+    data, hora = formatar_data_hora(rodada.get("instant"), rodada.get("tempo"))
+    cor = normalizar_cor_analise(rodada)
+    numero = rodada.get("numero", "?")
+    return f"{emoji_cor(cor)} {numero} — {data} às {hora}"
+
+
+def _alerta_registrar_sinal(origem, caminho_nome=None, gale=None, inicio=None, gatilho=None):
+    """Registra apenas sinais realmente produzidos durante a sessão ONLINE."""
+    global alertas_surfe_registro_sinais_seq
+    with alertas_surfe_lock:
+        if not alertas_surfe_ativos:
+            return None
+        alertas_surfe_registro_sinais_seq += 1
+        registro_id = alertas_surfe_registro_sinais_seq
+        item = {
+            "id": registro_id,
+            "origem": str(origem or "SURF"),
+            "caminho": caminho_nome,
+            "gale": gale,
+            "inicio": dict(inicio) if inicio else None,
+            "gatilho": dict(gatilho) if gatilho else None,
+            "resultado": "⏳ EM ANDAMENTO",
+        }
+        alertas_surfe_registro_sinais.append(item)
+        return registro_id
+
+
+def _alerta_atualizar_registro_sinal(registro_id, resultado):
+    if not registro_id:
+        return
+    with alertas_surfe_lock:
+        for item in alertas_surfe_registro_sinais:
+            if item.get("id") == registro_id:
+                item["resultado"] = resultado
+                break
+
+
+def _alerta_texto_registro_online():
+    """Status do monitor + últimas rodadas recebidas somente nesta sessão ONLINE."""
+    with alertas_surfe_lock:
+        ativo = alertas_surfe_ativos
+        modo = alertas_surfe_modo
+        total_novas = alertas_surfe_total_novas
+        operacoes = len(alertas_surfe_operacoes)
+        ultima = dict(alertas_surfe_ultima_rodada_detectada) if alertas_surfe_ultima_rodada_detectada else None
+        atraso = alertas_surfe_ultimo_atraso
+        rodadas = [dict(r) for r in list(alertas_surfe_registro)]
+
+    if modo == "Ambos":
+        modo_txt = "⚫ SURF 2 PRETOS + 🔴 SURF 2 VERMELHOS"
+    elif modo == "Preto":
+        modo_txt = "⚫ SURF 2 PRETOS"
+    elif modo == "Vermelho":
+        modo_txt = "🔴 SURF 2 VERMELHOS"
+    else:
+        modo_txt = "Não selecionado"
+
+    linhas = [
+        "📡 REGISTROS ONLINE",
+        "",
+        f"{'🟢 Monitor: ATIVO' if ativo else '🔴 Monitor: DESATIVADO'}",
+        f"🏄 Modo: {modo_txt}",
+        f"🔢 Rodadas novas detectadas: {total_novas}",
+        f"🎯 Operações abertas: {operacoes}",
+        "",
+    ]
+
+    if ultima:
+        data, hora = formatar_data_hora(ultima.get("instant"), ultima.get("tempo"))
+        cor = normalizar_cor_analise(ultima)
+        numero = ultima.get("numero")
+        linhas.extend([
+            f"🎲 Última rodada lida: {emoji_cor(cor)} {numero}",
+            f"📅 {data}",
+            f"🕐 Horário da rodada: {hora}",
+        ])
+        if atraso is not None:
+            linhas.append(f"⚡ Detectada em: {atraso:.1f}s após o horário da rodada")
+        else:
+            linhas.append("⚡ Detectada em: indisponível")
+    else:
+        linhas.append("🎲 Última rodada lida: aguardando nova rodada")
+
+    linhas.extend([
+        "",
+        "✅ Este aviso confirma que o monitor continua funcionando.",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "🎲 ÚLTIMAS RODADAS",
+        "",
+    ])
+
+    if rodadas:
+        # Mais recentes primeiro para facilitar a conferência.
+        for rodada in reversed(rodadas[-20:]):
+            _, hora = formatar_data_hora(rodada.get("instant"), rodada.get("tempo"))
+            cor = normalizar_cor_analise(rodada)
+            linhas.append(f"{emoji_cor(cor)} {rodada.get('numero', '?')} — {hora}")
+    else:
+        linhas.append("❌ Nenhuma rodada nova registrada nesta sessão.")
+
+    return "\n".join(linhas)
+
+
+def _alerta_texto_registros_sinais(mensagem_atualizacao=None):
+    """Lista somente sinais realmente emitidos durante a sessão ONLINE atual."""
+    with alertas_surfe_lock:
+        itens = [dict(x) for x in list(alertas_surfe_registro_sinais)]
+
+    linhas = [
+        "💾 REGISTROS DE SINAIS",
+        "",
+        "📌 Aqui ficam os sinais enviados pelo bot ao canal.",
+        "🔎 Cada registro mostra a origem do sinal e a referência de cor, número e horário para localizar o caminho nos Registros Online.",
+        "⚡ Inclui SURF e fica preparado para registros de SUPER GALE.",
+        "",
+    ]
+
+    if mensagem_atualizacao:
+        linhas.extend([mensagem_atualizacao, ""])
+
+    if not itens:
+        linhas.append("❌ NENHUM SINAL REGISTRADO")
+        return "\n".join(linhas)
+
+    # Mais recentes primeiro.
+    for item in reversed(itens[-20:]):
+        origem = item.get("origem", "SURF")
+        caminho = item.get("caminho")
+        gale = item.get("gale")
+        resultado = item.get("resultado") or "⏳ EM ANDAMENTO"
+
+        if origem.upper() == "SUPER GALE":
+            titulo = "⚡ SUPER GALE"
+        else:
+            titulo = f"🏄 {_alerta_nome_surfe(caminho)}" if caminho else "🏄 SURF"
+
+        linhas.extend([
+            f"💾 SINAL #{item.get('id')}",
+            titulo,
+        ])
+        if gale is not None:
+            linhas.append(f"🔥 Gale identificado: G{gale}")
+        linhas.extend([
+            f"📍 Início do caminho: {_alerta_referencia_rodada(item.get('inicio'))}",
+            f"🔥 Condição encontrada: {_alerta_referencia_rodada(item.get('gatilho'))}",
+            f"🎯 Resultado: {resultado}",
+            "──────────────",
+        ])
+
+    return "\n".join(linhas).rstrip()
+
+
+def _alerta_markup_registro_online():
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🔄 ATUALIZAR REGISTROS", callback_data="atualizar_registro_alertas_surfe"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "⬅️ VOLTAR", callback_data="menu_bot"
+    ))
+    return markup
+
+
+def _alerta_markup_registros_sinais():
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🔄 ATUALIZAR REGISTROS", callback_data="atualizar_registro_sinais_surfe"
+    ))
+    markup.add(telebot.types.InlineKeyboardButton(
+        "⬅️ VOLTAR", callback_data="menu_bot"
+    ))
+    return markup
+
+
+
+def _alerta_enviar_status_periodico(forcar=False):
+    global alertas_surfe_status_ultimo_envio
+    agora = time.monotonic()
+    with alertas_surfe_lock:
+        if not alertas_surfe_ativos:
+            return
+        ultimo = alertas_surfe_status_ultimo_envio
+        if not forcar and ultimo and (agora - ultimo) < ALERTAS_SURF_STATUS_INTERVALO:
+            return
+        alertas_surfe_status_ultimo_envio = agora
+    try:
+        bot.send_message(ALERTAS_CHAT_ID, _alerta_texto_status_monitor())
+    except Exception as erro:
+        print("ERRO AO ENVIAR STATUS DO MONITOR:", type(erro).__name__, str(erro))
+
+
+def _alerta_adicionar_rodada(rodada):
+    """Processa a entrada dos sinais existentes e depois atualiza os caminhos SURF."""
+    global alertas_surfe_ultima_rodada_detectada, alertas_surfe_ultimo_atraso, alertas_surfe_total_novas
+
+    # Registra o instante REAL em que o monitor enxergou a rodada nova.
+    agora_utc = datetime.now(timezone.utc)
+    atraso = None
+    dt_rodada = _datetime_tipminer(rodada.get("instant"))
+    if dt_rodada is not None:
+        try:
+            atraso = max(0.0, (agora_utc - dt_rodada.astimezone(timezone.utc)).total_seconds())
+        except Exception:
+            atraso = None
+    with alertas_surfe_lock:
+        alertas_surfe_ultima_rodada_detectada = dict(rodada)
+        alertas_surfe_ultimo_atraso = atraso
+        alertas_surfe_total_novas += 1
+        alertas_surfe_registro.append(dict(rodada))
+
+    # Primeiro: a rodada nova é a próxima aposta dos sinais que já estavam abertos.
+    _alerta_processar_operacoes(rodada)
+
+    # Depois: ela passa a fazer parte da estatística e pode completar um NOVO G9.
+    rid = rodada.get("rodada_id")
+    with alertas_surfe_lock:
+        ids = {r.get("rodada_id") for r in alertas_surfe_historico}
+        if rid not in ids:
+            alertas_surfe_historico.append(rodada)
+            if len(alertas_surfe_historico) > ANALYSIS_ROUNDS:
+                del alertas_surfe_historico[:-ANALYSIS_ROUNDS]
+        alertas_surfe_ultima_rodada_id = rid
+    _alerta_procurar_novos_g9()
+
+
+def _monitorar_alertas_surfe():
+    """Monitora silenciosamente e só fala no canal quando há sinal/Gale/resultado."""
+    global alertas_surfe_ultima_rodada_id
+    while True:
+        with alertas_surfe_lock:
+            ativo = alertas_surfe_ativos
+            ultimo_id = alertas_surfe_ultima_rodada_id
+        if not ativo:
+            return
+
+        try:
+            rodadas = _buscar_rodadas_recentes_alerta(limite=10)
+            if rodadas:
+                # Usa o horário da última rodada REAL já processada como fronteira.
+                # Assim, mesmo que a API ignore o limit, mude a janela retornada ou
+                # algum ID não apareça na resposta seguinte, registros antigos não
+                # voltam a ser contados como rodadas novas.
+                with alertas_surfe_lock:
+                    ultima_processada = (
+                        dict(alertas_surfe_historico[-1])
+                        if alertas_surfe_historico else None
+                    )
+                ultimo_ts = _ordem_temporal(ultima_processada) if ultima_processada else 0.0
+                novas = [r for r in rodadas if _ordem_temporal(r) > ultimo_ts]
+                novas = sorted(novas, key=_ordem_temporal)
+
+                for rodada in novas:
+                    with alertas_surfe_lock:
+                        if not alertas_surfe_ativos:
+                            return
+                    _alerta_adicionar_rodada(rodada)
+        except Exception as erro:
+            print("ERRO NO MONITOR DE ALERTAS SURF:", type(erro).__name__, str(erro))
+
+        # A cada 30 minutos envia um pequeno heartbeat para o canal.
+        # Assim sabemos que o monitor está vivo mesmo se nenhum caminho chegar ao G9.
+        _alerta_enviar_status_periodico()
+        time.sleep(ALERTAS_SURF_INTERVALO)
+
+
+def _iniciar_monitor_alertas_surfe(modo):
+    """Carrega as 2.000 rodadas, escolhe o(s) SURF(s) e inicia o monitor."""
+    global alertas_surfe_thread, alertas_surfe_ultima_rodada_id, alertas_surfe_modo
+    global alertas_surfe_historico, alertas_surfe_operacoes, alertas_surfe_sinais_emitidos
+    global alertas_surfe_caminhos_unicos_emitidos
+    global alertas_surfe_inicio_monitor_id, alertas_surfe_prealerta, alertas_surfe_registro
+    global alertas_surfe_stats
+    global alertas_surfe_status_ultimo_envio, alertas_surfe_ultima_rodada_detectada
+    global alertas_surfe_ultimo_atraso, alertas_surfe_total_novas
+    global alertas_surfe_registro_sinais, alertas_surfe_registro_sinais_seq
+    global alertas_surfe_registro_sinais_vistos_chat
+
+    rodadas = _buscar_rodadas_recentes_alerta(limite=ANALYSIS_ROUNDS)
+    if not rodadas:
+        raise RuntimeError("TipMiner não retornou histórico para iniciar os alertas.")
+
+    referencia = rodadas[-1].get("rodada_id")
+    with alertas_surfe_lock:
+        alertas_surfe_modo = modo
+        alertas_surfe_historico = list(rodadas[-ANALYSIS_ROUNDS:])
+        alertas_surfe_ultima_rodada_id = referencia
+        alertas_surfe_operacoes = {}
+        alertas_surfe_sinais_emitidos = set()
+        alertas_surfe_caminhos_unicos_emitidos = set()
+        alertas_surfe_inicio_monitor_id = referencia
+        alertas_surfe_prealerta = None
+        alertas_surfe_registro.clear()
+        alertas_surfe_registro_sinais.clear()
+        alertas_surfe_registro_sinais_seq = 0
+        alertas_surfe_registro_sinais_vistos_chat.clear()
+        alertas_surfe_stats = {
+            "green": 0,
+            "loss": 0,
+            "direto": 0,
+            "gales": {n: 0 for n in range(1, ALERTAS_SURF_STOP_GALE + 1)},
+        }
+        alertas_surfe_status_ultimo_envio = time.monotonic()
+        alertas_surfe_ultima_rodada_detectada = None
+        alertas_surfe_ultimo_atraso = None
+        alertas_surfe_total_novas = 0
+
+        if alertas_surfe_thread is None or not alertas_surfe_thread.is_alive():
+            alertas_surfe_thread = threading.Thread(
+                target=_monitorar_alertas_surfe,
+                name="alertas-surfe",
+                daemon=True,
+            )
+            alertas_surfe_thread.start()
+
+    # Começa ao vivo na rodada mais recente; não dispara sinais antigos.
+
+def _datetime_tipminer(valor):
+    if not valor:
+        return None
+    try:
+        texto = str(valor)
+        if texto.endswith("Z"):
+            texto = texto[:-1] + "+00:00"
+        dt = datetime.fromisoformat(texto)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "testar_rodada_ao_vivo")
+def testar_rodada_ao_vivo_callback(call):
+    try:
+        bot.answer_callback_query(call.id, "Consultando TipMiner diretamente...")
+
+        inicio_consulta = datetime.now(timezone.utc)
+        dados = buscar_historico_tipminer()
+        fim_consulta = datetime.now(timezone.utc)
+
+        if not dados:
+            bot.send_message(call.message.chat.id, "❌ TipMiner não retornou rodadas no teste direto.")
+            return
+
+        rodadas = []
+        for item in dados:
+            rodada = normalizar_rodada_historica(item)
+            if rodada:
+                rodadas.append(rodada)
+
+        if not rodadas:
+            bot.send_message(call.message.chat.id, "❌ Nenhuma rodada válida retornada pela TipMiner.")
+            return
+
+        # O teste não usa PostgreSQL nem o histórico já carregado do bot.
+        # Escolhe pela data/hora para não depender da ordem do JSON.
+        mais_recente = max(rodadas, key=_ordem_temporal)
+        dt_rodada = _datetime_tipminer(mais_recente.get("instant"))
+        fuso_sp = timezone(timedelta(hours=-3))
+        agora_sp = fim_consulta.astimezone(fuso_sp)
+
+        data_rodada, hora_rodada = formatar_data_hora(
+            mais_recente.get("instant"), mais_recente.get("tempo")
+        )
+        cor = mais_recente.get("resultado")
+        numero = mais_recente.get("numero")
+
+        if dt_rodada is not None:
+            atraso = max(0.0, (fim_consulta - dt_rodada.astimezone(timezone.utc)).total_seconds())
+            atraso_txt = f"{atraso:.1f}s"
+        else:
+            atraso_txt = "indisponível"
+
+        duracao = (fim_consulta - inicio_consulta).total_seconds()
+
+        bot.send_message(
+            call.message.chat.id,
+            "📡 TESTE TIPMINER DIRETO\n\n"
+            f"🎲 Mais recente: {emoji_cor(cor)} {numero}\n"
+            f"📅 Data da rodada: {data_rodada}\n"
+            f"🕐 Horário TipMiner: {hora_rodada}\n"
+            f"🤖 Horário da consulta: {agora_sp.strftime('%H:%M:%S')}\n"
+            f"⚡ Diferença rodada → bot: {atraso_txt}\n"
+            f"🌐 Tempo da requisição: {duracao:.2f}s\n\n"
+            "✅ Consulta feita DIRETAMENTE no /history da TipMiner.\n"
+            "🚫 PostgreSQL não foi usado neste teste."
+        )
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(
+                call.message.chat.id,
+                f"❌ Erro no teste direto: {type(erro).__name__}: {str(erro)[:250]}"
+            )
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "configurar_estrategia")
+def configurar_estrategia_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            _texto_seletor_estrategia_bot(),
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=_seletor_estrategia_bot_markup(),
+        )
+    except Exception:
+        traceback.print_exc()
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_modo_surf_normal")
+def config_modo_surf_normal_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        bot.edit_message_text(
+            _texto_configurar_estrategia(chat_id),
+            chat_id,
+            call.message.message_id,
+            reply_markup=configurar_estrategia_markup(chat_id),
+        )
+    except Exception:
+        traceback.print_exc()
+
+
+
+
+def _teste_enviar_imagem(chat_id, chave, gale=None):
+    cfg = _textos_canal_cfg(chat_id)
+
+    if chave == "green":
+        chave_gale = str(int(gale or 0))
+        imagem = cfg.get("green_imagens", {}).get(chave_gale)
+        if imagem is None:
+            imagem = cfg.get("green_imagem")
+    else:
+        imagem = cfg.get("loss_imagem")
+
+    if imagem:
+        if imagem["tipo"] == "document":
+            bot.send_document(ALERTAS_CHAT_ID, imagem["file_id"])
+        else:
+            bot.send_photo(ALERTAS_CHAT_ID, imagem["file_id"])
+    else:
+        if chave == "green":
+            bot.send_photo(ALERTAS_CHAT_ID, _alerta_card_bytes("green", gale))
+        else:
+            bot.send_photo(ALERTAS_CHAT_ID, _alerta_card_bytes("loss"))
+
+def _teste_registro_operacao(resultado, entrada, confirmacao, hora="22:52"):
+    linhas = [
+        "📊 REGISTRO DA OPERAÇÃO",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        f"🎲 ENTRADA: {entrada}",
+        f"🎯 CONFIRMAÇÃO: {confirmacao}",
+        f"🏁 RESULTADO: {resultado}",
+        f"🕐 HORÁRIO: {hora}",
+    ]
+    return "\n".join(linhas).upper()
+
+def _executar_teste_textos_canal(chat_id):
+    # Somente apresentação: não ativa monitor, não cria operação e não altera estatísticas.
+    bot.send_message(
+        ALERTAS_CHAT_ID,
+        "🧪 MODO DE TESTE\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "⚠️ AS MENSAGENS A SEGUIR SÃO APENAS\n"
+        "UMA SIMULAÇÃO VISUAL.\n\n"
+        "🚫 NÃO É UM SINAL REAL."
+    )
+
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(chat_id, "online"))
+
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+        chat_id, "chegando",
+        SURF="🔴 SURF 2 VERMELHOS",
+        GALE_GATILHO="G12",
+        GALE_ATUAL="G10",
+    ))
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+        chat_id, "chegando",
+        SURF="🔴 SURF 2 VERMELHOS",
+        GALE_GATILHO="G12",
+        GALE_ATUAL="G11",
+    ))
+
+    # Exemplo de caminho que cancela antes do gatilho.
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+        chat_id, "cancelado",
+        SURF="🔴 SURF 2 VERMELHOS",
+        GALE_GATILHO="G12",
+        GALE_ATUAL="G11",
+    ))
+
+    # Novo caminho, desta vez chegando ao gatilho.
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+        chat_id, "chegando",
+        SURF="⚫ SURF 2 PRETOS",
+        GALE_GATILHO="G12",
+        GALE_ATUAL="G10",
+    ))
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+        chat_id, "chegando",
+        SURF="⚫ SURF 2 PRETOS",
+        GALE_GATILHO="G12",
+        GALE_ATUAL="G11",
+    ))
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+        chat_id, "sinal",
+        GALE_GATILHO="G12",
+        COR_ULTIMA="🔴",
+        NUMERO_ULTIMA="7",
+        COR_ENTRADA="⚫ PRETO",
+        SURF="⚫ SURF 2 PRETOS",
+    ))
+
+    # Um único modelo de texto para todos os Gales.
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(chat_id, "gales", GALE="G1"))
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(chat_id, "gales", GALE="G2"))
+
+    # Exemplo GREEN completo: texto -> imagem -> registro.
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+        chat_id, "green", RESULTADO_GALE="NO G2"
+    ))
+    _teste_enviar_imagem(chat_id, "green", 2)
+    bot.send_message(
+        ALERTAS_CHAT_ID,
+        _teste_registro_operacao("GREEN ✅", "⚫ PRETO", "G2")
+    )
+
+    # Exemplo LOSS completo e separado.
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(
+        chat_id, "loss", LIMITE_GALE="G6"
+    ))
+    _teste_enviar_imagem(chat_id, "loss")
+    bot.send_message(
+        ALERTAS_CHAT_ID,
+        _teste_registro_operacao("LOSS ❌", "🔴 VERMELHO", "G6")
+    )
+
+    bot.send_message(ALERTAS_CHAT_ID, _render_texto_canal(chat_id, "offline"))
+
+    bot.send_message(
+        ALERTAS_CHAT_ID,
+        "🧪 TESTE FINALIZADO\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "✅ TODAS AS MENSAGENS FORAM TESTADAS."
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_textos_menu")
+def config_textos_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        _texto_menu_principal(),
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=_textos_menu_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "texto_testar_canal")
+def texto_testar_canal_callback(call):
+    bot.answer_callback_query(call.id, "🧪 ENVIANDO TESTE PARA O CANAL...")
+    chat_id = call.message.chat.id
+    try:
+        _executar_teste_textos_canal(chat_id)
+        bot.send_message(
+            chat_id,
+            "✅ TESTE ENVIADO PARA O CANAL.\n\n"
+            "📌 FOI APENAS UMA SIMULAÇÃO VISUAL.\n"
+            "🚫 O MONITORAMENTO, AS OPERAÇÕES E AS ESTATÍSTICAS NÃO FORAM ALTERADOS."
+        )
+    except Exception as exc:
+        bot.send_message(chat_id, f"❌ ERRO AO TESTAR TEXTOS NO CANAL:\n{type(exc).__name__}: {exc}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("texto_menu:"))
+def texto_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    chave = call.data.split(":", 1)[1]
+    chat_id = call.message.chat.id
+    bot.edit_message_text(
+        _texto_item_painel(chat_id, chave),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_texto_item_markup(chave),
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("texto_editar:"))
+def texto_editar_callback(call):
+    bot.answer_callback_query(call.id)
+    chave = call.data.split(":", 1)[1]
+    titulo = _TEXTOS_CANAL_META[chave][0]
+    obrigatorios = sorted(_TEXTOS_CANAL_REQUIRED.get(chave, set()))
+    detalhe = ""
+    if obrigatorios:
+        detalhe = "\n\n🔒 MANTENHA ESTES CAMPOS NO NOVO TEXTO:\n" + "\n".join(f"• {x}" for x in obrigatorios)
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"✏️ ALTERAR TEXTO — {titulo}\n\n"
+        "ENVIE AGORA A NOVA MENSAGEM COMPLETA.\n"
+        "VOCÊ PODE USAR VÁRIAS LINHAS E EMOJIS."
+        f"{detalhe}\n\n"
+        "📌 SOMENTE AS FRASES MUDAM. OS DADOS REAIS CONTINUAM SENDO CONTROLADOS PELA LÓGICA DO BOT.",
+    )
+    bot.register_next_step_handler(msg, _receber_texto_personalizado, chave)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("texto_restaurar:"))
+def texto_restaurar_callback(call):
+    chave = call.data.split(":", 1)[1]
+    chat_id = call.message.chat.id
+    _textos_canal_cfg(chat_id)["textos"][chave] = _TEXTOS_CANAL_PADRAO[chave]
+    bot.answer_callback_query(call.id, "♻️ TEXTO PADRÃO RESTAURADO")
+    bot.edit_message_text(
+        _texto_item_painel(chat_id, chave),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_texto_item_markup(chave),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "green_imagens_menu")
+def green_imagens_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    bot.edit_message_text(
+        _green_imagens_texto(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_green_imagens_markup(chat_id),
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("green_imagem_item:"))
+def green_imagem_item_callback(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    gale = int(call.data.split(":", 1)[1])
+    salvo = str(gale) in _textos_canal_cfg(chat_id).get("green_imagens", {})
+    status = "✅ IMAGEM PERSONALIZADA CADASTRADA" if salvo else "▫️ USANDO IMAGEM PADRÃO DO BOT"
+
+    bot.edit_message_text(
+        f"🖼️ GREEN {_green_nome_resultado(gale)}\n\n"
+        f"{status}\n\n"
+        "ESTA IMAGEM SERÁ USADA SOMENTE QUANDO A OPERAÇÃO "
+        f"ACERTAR EM {_green_nome_resultado(gale)}.\n\n"
+        "👇 ESCOLHA O QUE DESEJA FAZER:",
+        chat_id,
+        call.message.message_id,
+        reply_markup=_green_imagem_item_markup(gale),
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("green_imagem_enviar:"))
+def green_imagem_enviar_callback(call):
+    bot.answer_callback_query(call.id)
+    gale = int(call.data.split(":", 1)[1])
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"🖼️ ENVIAR IMAGEM — GREEN {_green_nome_resultado(gale)}\n\n"
+        "ENVIE AGORA A IMAGEM QUE DESEJA USAR.\n\n"
+        "VOCÊ PODE ENVIAR COMO FOTO OU COMO ARQUIVO DE IMAGEM EM ALTA QUALIDADE/4K.\n\n"
+        f"📌 ESTA IMAGEM SERÁ USADA SOMENTE NO GREEN {_green_nome_resultado(gale)}."
+    )
+    bot.register_next_step_handler(msg, _receber_imagem_green_gale, gale)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("green_imagem_remover:"))
+def green_imagem_remover_callback(call):
+    gale = int(call.data.split(":", 1)[1])
+    chat_id = call.message.chat.id
+    _textos_canal_cfg(chat_id).setdefault("green_imagens", {}).pop(str(gale), None)
+    bot.answer_callback_query(call.id, "🗑 IMAGEM REMOVIDA")
+    bot.edit_message_text(
+        f"🖼️ GREEN {_green_nome_resultado(gale)}\n\n"
+        "▫️ IMAGEM PERSONALIZADA REMOVIDA.\n\n"
+        "O BOT VOLTOU A USAR A IMAGEM PADRÃO PARA ESTE RESULTADO.",
+        chat_id,
+        call.message.message_id,
+        reply_markup=_green_imagem_item_markup(gale),
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "green_imagens_remover_todas")
+def green_imagens_remover_todas_callback(call):
+    chat_id = call.message.chat.id
+    _textos_canal_cfg(chat_id)["green_imagens"] = {}
+    # Remove também o fallback antigo, para ficar realmente zerado.
+    _textos_canal_cfg(chat_id)["green_imagem"] = None
+    bot.answer_callback_query(call.id, "🗑 TODAS AS IMAGENS GREEN FORAM REMOVIDAS")
+    bot.edit_message_text(
+        _green_imagens_texto(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_green_imagens_markup(chat_id),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("texto_imagem:"))
+def texto_imagem_callback(call):
+    bot.answer_callback_query(call.id)
+    chave = call.data.split(":", 1)[1]
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"🖼️ ALTERAR IMAGEM — {chave.upper()}\n\n"
+        "ENVIE AGORA A IMAGEM QUE DESEJA USAR.\n\n"
+        "VOCÊ PODE ENVIAR COMO FOTO OU COMO ARQUIVO DE IMAGEM EM ALTA QUALIDADE/4K.\n\n"
+        "📌 ELA SERÁ ENVIADA SEPARADA: TEXTO → IMAGEM → REGISTRO DA OPERAÇÃO."
+    )
+    bot.register_next_step_handler(msg, _receber_imagem_personalizada, chave)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("texto_imagem_remover:"))
+def texto_imagem_remover_callback(call):
+    chave = call.data.split(":", 1)[1]
+    chat_id = call.message.chat.id
+    _textos_canal_cfg(chat_id)[f"{chave}_imagem"] = None
+    bot.answer_callback_query(call.id, "🗑 IMAGEM PERSONALIZADA REMOVIDA")
+    bot.edit_message_text(
+        _texto_item_painel(chat_id, chave),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_texto_item_markup(chave),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_manual")
+def config_manual_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        _texto_manual(),
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=_voltar_config_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_gale_menu")
+def config_gale_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    bot.edit_message_text(
+        _texto_gale_menu(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_gale_menu_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("config_gale_set:"))
+def config_gale_set_callback(call):
+    chat_id = call.message.chat.id
+    valor = int(call.data.split(":", 1)[1])
+    _desativado = _desativar_para_alteracao(chat_id, "surf")
+    _cfg(chat_id)["gale_gatilho"] = valor
+    bot.answer_callback_query(call.id, f"🔥 Gale de gatilho definido: G{valor}")
+    bot.edit_message_text(
+        _texto_gale_menu(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_gale_menu_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_surf_menu")
+def config_surf_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    bot.edit_message_text(
+        _texto_surf_menu(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_surf_menu_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("config_surf_set:"))
+def config_surf_set_callback(call):
+    chat_id = call.message.chat.id
+    valor = call.data.split(":", 1)[1]
+    _desativado = _desativar_para_alteracao(chat_id, "surf")
+    _cfg(chat_id)["surf"] = valor
+    bot.answer_callback_query(call.id, f"🏄 SURF definido: {_surf_nome(valor)}")
+    bot.edit_message_text(
+        _texto_surf_menu(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_surf_menu_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_limite_menu")
+def config_limite_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    bot.edit_message_text(
+        _texto_limite_menu(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_limite_menu_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("config_limite_set:"))
+def config_limite_set_callback(call):
+    chat_id = call.message.chat.id
+    valor = int(call.data.split(":", 1)[1])
+    _desativado = _desativar_para_alteracao(chat_id, "surf")
+    _cfg(chat_id)["limite_gales"] = valor
+    bot.answer_callback_query(call.id, f"🛡 Limite definido: G{valor}")
+    bot.edit_message_text(
+        _texto_limite_menu(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_limite_menu_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_aviso_menu")
+def config_aviso_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    bot.edit_message_text(
+        _texto_aviso_menu(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_aviso_menu_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("config_aviso_set:"))
+def config_aviso_set_callback(call):
+    chat_id = call.message.chat.id
+    valor = int(call.data.split(":", 1)[1])
+    _desativado = _desativar_para_alteracao(chat_id, "surf")
+    _cfg(chat_id)["aviso_antes"] = valor
+    msg = "🔕 Pré-alerta desativado" if valor == 0 else f"⚠️ Aviso definido: {valor} Gale(s) antes"
+    bot.answer_callback_query(call.id, msg)
+    bot.edit_message_text(
+        _texto_aviso_menu(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_aviso_menu_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_incompleta")
+def config_incompleta_callback(call):
+    try:
+        bot.answer_callback_query(
+            call.id,
+            "⚙️ Configure Gale, SURF, limite e aviso antes de ativar.",
+            show_alert=True,
+        )
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_ativar_resumo")
+def config_ativar_resumo_callback(call):
+    chat_id = call.message.chat.id
+    if not _config_completa(_cfg(chat_id)):
+        bot.answer_callback_query(
+            call.id,
+            "⚙️ Complete toda a configuração antes de ativar.",
+            show_alert=True,
+        )
+        return
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        _texto_resumo_ativacao(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_ativar_resumo_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_confirmar_ativar")
+def config_confirmar_ativar_callback(call):
+    global TEXTOS_CANAL_OWNER_CHAT_ID
+    chat_id = call.message.chat.id
+    cfg = _cfg(chat_id)
+    if not _config_completa(cfg):
+        bot.answer_callback_query(
+            call.id,
+            "⚙️ A configuração está incompleta.",
+            show_alert=True,
+        )
+        return
+    # Nova ativação = nova sessão. Não reaproveita caminhos/Gales/sinais antigos.
+    cfg["ativa"] = True
+    cfg["pausada"] = False
+    TEXTOS_CANAL_OWNER_CHAT_ID = chat_id
+    try:
+        _configurar_e_iniciar_monitor_real(chat_id)
+    except Exception as erro:
+        cfg["ativa"] = False
+        cfg["pausada"] = False
+        bot.answer_callback_query(call.id, "❌ Não foi possível iniciar o monitor", show_alert=True)
+        bot.send_message(
+            chat_id,
+            f"❌ ERRO AO INICIAR O MONITOR REAL:\n{type(erro).__name__}: {str(erro)[:300]}"
+        )
+        return
+    bot.answer_callback_query(call.id, "🟢 Estratégia ativada")
+
+    # 1) No BOT ANALISADOR: mantém o painel completo da ativação.
+    bot.edit_message_text(
+        _texto_bot_ativada(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=configurar_estrategia_markup(chat_id),
+    )
+
+    # 2) No CANAL DE SINAIS: envia uma mensagem curta adicional.
+    _enviar_canal_surf(chat_id, _texto_canal_ativada(chat_id))
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_parar_bot")
+def config_parar_bot_callback(call):
+    chat_id = call.message.chat.id
+    cfg = _cfg(chat_id)
+    cfg["ativa"] = True
+    cfg["pausada"] = True
+
+    # Ao pausar, desliga o monitor real e abandona completamente a sessão.
+    _parar_monitor_real()
+
+    bot.answer_callback_query(call.id, "⏸ Estratégia pausada")
+
+    # Canal de sinais: aviso curto e direto.
+    _enviar_canal_surf(chat_id, _texto_canal_offline(chat_id))
+
+    # Bot analisador: mantém a explicação completa sobre o reset da sessão.
+    bot.edit_message_text(
+        _texto_sinais_offline(),
+        chat_id,
+        call.message.message_id,
+        reply_markup=configurar_estrategia_markup(chat_id),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_retomar_bot")
+def config_retomar_bot_callback(call):
+    chat_id = call.message.chat.id
+    cfg = _cfg(chat_id)
+    # Reiniciar nunca continua a sessão pausada: começa um acompanhamento novo.
+    cfg["ativa"] = True
+    cfg["pausada"] = False
+    try:
+        _configurar_e_iniciar_monitor_real(chat_id)
+    except Exception as erro:
+        cfg["ativa"] = False
+        cfg["pausada"] = True
+        bot.answer_callback_query(call.id, "❌ Não foi possível retomar o monitor", show_alert=True)
+        bot.send_message(
+            chat_id,
+            f"❌ ERRO AO RETOMAR O MONITOR REAL:\n{type(erro).__name__}: {str(erro)[:300]}"
+        )
+        return
+    bot.answer_callback_query(call.id, "▶️ Estratégia retomada")
+
+    bot.edit_message_text(
+        _texto_bot_ativada(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=configurar_estrategia_markup(chat_id),
+    )
+
+    _enviar_canal_surf(chat_id, _texto_canal_ativada(chat_id))
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_excluir_confirmar")
+def config_excluir_confirmar_callback(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    bot.edit_message_text(
+        _texto_exclusao(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=_excluir_markup(),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "config_excluir_sim")
+def config_excluir_sim_callback(call):
+    chat_id = call.message.chat.id
+    _parar_monitor_real()
+    ESTRATEGIAS_CONFIG[chat_id] = _estrategia_padrao()
+    bot.answer_callback_query(call.id, "🗑 Estratégia excluída")
+    _enviar_canal_surf(chat_id, _texto_canal_offline(chat_id))
+    bot.edit_message_text(
+        _texto_configurar_estrategia(chat_id),
+        chat_id,
+        call.message.message_id,
+        reply_markup=configurar_estrategia_markup(chat_id),
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("config_placeholder_digitacao:"))
+def config_placeholder_digitacao_callback(call):
+    bot.answer_callback_query(
+        call.id,
+        "✏️ A digitação manual será ligada na próxima etapa.",
+        show_alert=False,
+    )
+
+
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("rel_menu", "gatrel_menu"))
+def relatorio_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    modo = "gatilho" if call.data.startswith("gat") else "surf"
+    bot.edit_message_text(_texto_relatorio_menu(call.message.chat.id, modo), call.message.chat.id,
+                          call.message.message_id, reply_markup=_relatorio_markup(modo, call.message.chat.id))
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("rel_set:") or call.data.startswith("gatrel_set:"))
+def relatorio_set_callback(call):
+    modo = "gatilho" if call.data.startswith("gat") else "surf"
+    valor = int(call.data.split(":", 1)[1])
+    cfg = _relatorio_cfg(call.message.chat.id, modo)
+    cfg["relatorio_qtd"] = valor
+    cfg["relatorio_bloco"] = []
+    cfg["relatorio_anterior"] = None
+    cfg["relatorio_geral_blocos"] = 0
+    cfg["relatorio_geral_sinais"] = 0
+    cfg["relatorio_geral_greens"] = 0
+    cfg["relatorio_geral_saldo"] = 0
+    bot.answer_callback_query(call.id, "🚫 Relatório desativado" if valor == 0 else f"📊 Relatório a cada {valor} sinais")
+    bot.edit_message_text(_texto_relatorio_menu(call.message.chat.id, modo), call.message.chat.id,
+                          call.message.message_id, reply_markup=_relatorio_markup(modo, call.message.chat.id))
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("rel_outro", "gatrel_outro"))
+def relatorio_outro_callback(call):
+    modo = "gatilho" if call.data.startswith("gat") else "surf"
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id,
+        "🔢 QUANTIDADE PERSONALIZADA\n\nDigite a quantidade de sinais encerrados para gerar o relatório.\n\n📌 Exemplo: 75")
+    bot.register_next_step_handler(msg, _relatorio_receber_qtd, modo)
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("rel_ver", "gatrel_ver"))
+def relatorio_ver_callback(call):
+    modo = "gatilho" if call.data.startswith("gat") else "surf"
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "👁 TEXTO ATUAL DO RELATÓRIO\n\n" + _relatorio_exemplo(_relatorio_cfg(call.message.chat.id, modo)),
+        call.message.chat.id, call.message.message_id, reply_markup=_relatorio_texto_markup(modo)
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("rel_editar", "gatrel_editar"))
+def relatorio_editar_callback(call):
+    modo = "gatilho" if call.data.startswith("gat") else "surf"
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id,
+        "✏️ ALTERAR TEXTO DO RELATÓRIO\n\nEnvie o novo modelo completo.\n\n"
+        "Campos disponíveis: {qtd}, {greens}, {loss}, {taxa_green}, {taxa_loss}, {distribuicao}, "
+        "{seq_green}, {seq_loss}, {maior_gale}, {unidades_green}, {unidades_loss}, {saldo}, "
+        "{emoji_resultado}, {resultado}, {comparacao}.\n\nVocê pode mudar frases, emojis, ordem e separadores.")
+    bot.register_next_step_handler(msg, _relatorio_receber_texto, modo)
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("rel_restaurar", "gatrel_restaurar"))
+def relatorio_restaurar_callback(call):
+    modo = "gatilho" if call.data.startswith("gat") else "surf"
+    _relatorio_cfg(call.message.chat.id, modo)["relatorio_texto"] = None
+    bot.answer_callback_query(call.id, "♻️ Texto padrão restaurado")
+    bot.edit_message_text(_texto_relatorio_menu(call.message.chat.id, modo), call.message.chat.id,
+                          call.message.message_id, reply_markup=_relatorio_markup(modo, call.message.chat.id))
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_midias")
+def gatcfg_midias_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🖼️ GREEN / LOSS — ENTRADA POR GATILHO\n\n"
+        "Estas imagens são EXCLUSIVAS desta estratégia e não alteram as imagens do SURF normal.\n\n"
+        "🟢 GREEN: DIRETO / SEM GALE + GALE 1 até GALE 20.\n"
+        "🔴 LOSS: uma imagem própria.\n\n"
+        "👇 Escolha o que deseja configurar:",
+        call.message.chat.id, call.message.message_id,
+        reply_markup=_gatcfg_midias_markup(call.message.chat.id)
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_green_menu")
+def gatcfg_green_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🟢 IMAGENS GREEN — ENTRADA POR GATILHO\n\n"
+        "Sempre ficam disponíveis DIRETO / SEM GALE e GALE 1 até GALE 20, "
+        "independentemente do limite configurado.\n\n"
+        "✅ = imagem personalizada\n▫️ = imagem padrão do bot",
+        call.message.chat.id, call.message.message_id,
+        reply_markup=_gatcfg_green_markup(call.message.chat.id)
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gatcfg_green_item:"))
+def gatcfg_green_item_callback(call):
+    bot.answer_callback_query(call.id)
+    gale = int(call.data.split(":", 1)[1])
+    bot.edit_message_text(
+        f"🟢 GREEN {_gatcfg_green_nome(gale)} — ENTRADA POR GATILHO\n\n"
+        "Cadastre a imagem que será enviada quando esta estratégia acertar exatamente neste resultado.",
+        call.message.chat.id, call.message.message_id,
+        reply_markup=_gatcfg_green_item_markup(gale)
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gatcfg_green_enviar:"))
+def gatcfg_green_enviar_callback(call):
+    bot.answer_callback_query(call.id)
+    gale = int(call.data.split(":", 1)[1])
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"🖼️ ENVIE AGORA A IMAGEM DO GREEN {_gatcfg_green_nome(gale)}."
+    )
+    bot.register_next_step_handler(msg, _gatcfg_receber_green, gale)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gatcfg_green_remover:"))
+def gatcfg_green_remover_callback(call):
+    chat_id = call.message.chat.id
+    gale = int(call.data.split(":", 1)[1])
+    _gatcfg_midias(chat_id).setdefault("green_imagens", {}).pop(str(gale), None)
+    bot.answer_callback_query(call.id, "🗑 Imagem removida")
+    bot.edit_message_text(
+        f"🟢 GREEN {_gatcfg_green_nome(gale)} — ENTRADA POR GATILHO\n\n▫️ USANDO IMAGEM PADRÃO DO BOT.",
+        chat_id, call.message.message_id, reply_markup=_gatcfg_green_item_markup(gale)
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_green_remover_todas")
+def gatcfg_green_remover_todas_callback(call):
+    chat_id = call.message.chat.id
+    _gatcfg_midias(chat_id)["green_imagens"] = {}
+    bot.answer_callback_query(call.id, "🗑 Todas as imagens GREEN removidas")
+    bot.edit_message_text(
+        "🟢 IMAGENS GREEN — ENTRADA POR GATILHO\n\n▫️ TODAS ESTÃO USANDO A IMAGEM PADRÃO DO BOT.",
+        chat_id, call.message.message_id, reply_markup=_gatcfg_green_markup(chat_id)
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_loss_menu")
+def gatcfg_loss_menu_callback(call):
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    salvo = "✅ IMAGEM PERSONALIZADA SALVA" if _gatcfg_midias(chat_id).get("loss_imagem") else "▫️ USANDO IMAGEM PADRÃO DO BOT"
+    bot.edit_message_text(
+        f"🔴 LOSS — ENTRADA POR GATILHO\n\n{salvo}",
+        chat_id, call.message.message_id, reply_markup=_gatcfg_loss_markup()
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_loss_enviar")
+def gatcfg_loss_enviar_callback(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id, "🖼️ ENVIE AGORA A IMAGEM DO LOSS.")
+    bot.register_next_step_handler(msg, _gatcfg_receber_loss)
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_loss_remover")
+def gatcfg_loss_remover_callback(call):
+    chat_id = call.message.chat.id
+    _gatcfg_midias(chat_id)["loss_imagem"] = None
+    bot.answer_callback_query(call.id, "🗑 Imagem LOSS removida")
+    bot.edit_message_text(
+        "🔴 LOSS — ENTRADA POR GATILHO\n\n▫️ USANDO IMAGEM PADRÃO DO BOT.",
+        chat_id, call.message.message_id, reply_markup=_gatcfg_loss_markup()
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_menu")
+def gatcfg_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    bot.edit_message_text(_texto_gatcfg_menu(chat_id), chat_id, call.message.message_id,
+                          reply_markup=_gatcfg_markup(chat_id))
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_gale_menu")
+def gatcfg_gale_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🔥 GALE-GATILHO\n\n"
+        "Escolha qual Gale do SURF deverá funcionar como gatilho.\n\n"
+        "📌 Ao atingir esse Gale, a oportunidade imediatamente seguinte será a entrada.",
+        call.message.chat.id, call.message.message_id, reply_markup=_gatcfg_gale_markup())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gatcfg_gale_set:"))
+def gatcfg_gale_set_callback(call):
+    chat_id = call.message.chat.id
+    valor = int(call.data.split(":", 1)[1])
+    _desativado = _desativar_para_alteracao(chat_id, "gatilho")
+    _cfg_gatilho(chat_id)["gale_gatilho"] = valor
+    bot.answer_callback_query(call.id, f"🔥 G{valor} selecionado")
+    bot.edit_message_text(_texto_gatcfg_menu(chat_id), chat_id, call.message.message_id,
+                          reply_markup=_gatcfg_markup(chat_id))
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_surf_menu")
+def gatcfg_surf_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🏄 ESCOLHER SURF\n\n"
+        "Escolha qual caminho do SURF vai gerar os Gales-gatilho.\n\n"
+        "📍 O ponto inicial pode estar relacionado a:\n\n"
+        "⚪ Após BRANCO\n🔴 Após VERMELHO\n⚫ Após PRETO",
+        call.message.chat.id, call.message.message_id, reply_markup=_gatcfg_surf_markup())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gatcfg_surf_set:"))
+def gatcfg_surf_set_callback(call):
+    chat_id = call.message.chat.id
+    valor = call.data.split(":", 1)[1]
+    _desativado = _desativar_para_alteracao(chat_id, "gatilho")
+    _cfg_gatilho(chat_id)["surf"] = valor
+    bot.answer_callback_query(call.id, "🏄 SURF selecionado")
+    bot.edit_message_text(_texto_gatcfg_menu(chat_id), chat_id, call.message.message_id,
+                          reply_markup=_gatcfg_markup(chat_id))
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_limite_menu")
+def gatcfg_limite_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🛡 LIMITE DE GALES\n\n"
+        "Escolha até qual Gale a operação pode chegar.\n\n"
+        "📌 Exemplo — limite G3:\n\n"
+        "🎯 DIRETO\n"
+        "❌ Perdeu → espera novo gatilho → G1\n"
+        "❌ Perdeu → espera novo gatilho → G2\n"
+        "❌ Perdeu → espera novo gatilho → G3\n\n"
+        "✅ Bateu → GREEN e reinicia\n"
+        "❌ Perdeu no G3 → LOSS e reinicia\n\n"
+        "👇 Escolha o limite:",
+        call.message.chat.id, call.message.message_id, reply_markup=_gatcfg_limite_markup())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gatcfg_limite_set:"))
+def gatcfg_limite_set_callback(call):
+    chat_id = call.message.chat.id
+    valor = int(call.data.split(":", 1)[1])
+    _desativado = _desativar_para_alteracao(chat_id, "gatilho")
+    _cfg_gatilho(chat_id)["limite_gales"] = valor
+    bot.answer_callback_query(call.id, f"🛡 Limite G{valor}")
+    bot.edit_message_text(_texto_gatcfg_menu(chat_id), chat_id, call.message.message_id,
+                          reply_markup=_gatcfg_markup(chat_id))
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_aviso_menu")
+def gatcfg_aviso_menu_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "⚠️ AVISO ANTES DO GATILHO\n\n"
+        "Escolha com quantos Gales de antecedência você quer ser avisado quando um caminho estiver se aproximando do Gale de gatilho.\n\n"
+        "📌 Exemplo:\n"
+        "Gatilho configurado: G12\n\n"
+        "• Aviso 2 antes → começa no G10\n"
+        "• Aviso 1 antes → começa no G11\n"
+        "• 🚫 Não avisar → aguarda o G12 diretamente\n\n"
+        "O aviso não é uma entrada. Ele apenas informa que o caminho está chegando perto do gatilho.\n\n"
+        "👇 Escolha quando deseja receber o aviso:",
+        call.message.chat.id, call.message.message_id, reply_markup=_gatcfg_aviso_markup()
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gatcfg_aviso_set:"))
+def gatcfg_aviso_set_callback(call):
+    chat_id = call.message.chat.id
+    valor = int(call.data.split(":", 1)[1])
+    _desativado = _desativar_para_alteracao(chat_id, "gatilho")
+    _cfg_gatilho(chat_id)["aviso_antes"] = valor
+    bot.answer_callback_query(call.id, "🚫 Aviso desativado" if valor == 0 else f"⚠️ {valor} Gale(s) antes")
+    bot.edit_message_text(_texto_gatcfg_menu(chat_id), chat_id, call.message.message_id,
+                          reply_markup=_gatcfg_markup(chat_id))
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_incompleta")
+def gatcfg_incompleta_callback(call):
+    bot.answer_callback_query(call.id, "⚙️ Configure Gale-gatilho, SURF e limite.", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_ativar")
+def gatcfg_ativar_callback(call):
+    chat_id = call.message.chat.id
+    cfg = _cfg_gatilho(chat_id)
+    if not _gatcfg_completa(cfg):
+        bot.answer_callback_query(call.id, "⚙️ Complete a configuração.", show_alert=True)
+        return
+    # Evita dois motores diferentes ativos ao mesmo tempo.
+    _parar_monitor_real()
+    for c in ESTRATEGIAS_CONFIG.values():
+        c["ativa"] = False
+        c["pausada"] = False
+    cfg["ativa"] = True
+    cfg["pausada"] = False
+    try:
+        _configurar_e_iniciar_monitor_gatilho(chat_id)
+    except Exception as erro:
+        cfg["ativa"] = False
+        bot.answer_callback_query(call.id, "❌ Erro ao iniciar", show_alert=True)
+        bot.send_message(chat_id, f"❌ ERRO AO INICIAR: {type(erro).__name__}: {str(erro)[:250]}")
+        return
+    bot.answer_callback_query(call.id, "🟢 Entrada por Gatilho ativada")
+    bot.edit_message_text(
+        "🎯 SURF — ENTRADA POR GATILHO\n\n"
+        "🟢 ESTRATÉGIA ATIVADA\n\n"
+        f"🔥 Gatilho: G{cfg['gale_gatilho']}\n"
+        f"🏄 SURF: {_surf_nome(cfg['surf'])}\n"
+        f"🛡 Limite: G{cfg['limite_gales']}\n\n"
+        "📡 Monitoramento iniciado a partir da rodada mais recente.\n"
+        "⏳ Aguardando o Gale-gatilho...",
+        chat_id, call.message.message_id, reply_markup=_gatcfg_markup(chat_id))
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_parar")
+def gatcfg_parar_callback(call):
+    chat_id = call.message.chat.id
+    cfg = _cfg_gatilho(chat_id)
+    _parar_monitor_real()
+    cfg["ativa"] = True
+    cfg["pausada"] = True
+    bot.answer_callback_query(call.id, "⏸ Bot parado")
+    bot.edit_message_text(_texto_gatcfg_menu(chat_id), chat_id, call.message.message_id,
+                          reply_markup=_gatcfg_markup(chat_id))
+
+@bot.callback_query_handler(func=lambda call: call.data == "gatcfg_excluir")
+def gatcfg_excluir_callback(call):
+    chat_id = call.message.chat.id
+    _parar_monitor_real()
+    ESTRATEGIAS_GATILHO_CONFIG[chat_id] = _estrategia_gatilho_padrao()
+    bot.answer_callback_query(call.id, "🗑 Configuração excluída")
+    bot.edit_message_text(_texto_gatcfg_menu(chat_id), chat_id, call.message.message_id,
+                          reply_markup=_gatcfg_markup(chat_id))
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "menu_bot")
+def menu_bot_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            _texto_controle_bot(),
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=bot_controle_markup(),
+        )
+    except Exception:
+        traceback.print_exc()
+        try:
+            bot.send_message(
+                call.message.chat.id,
+                _texto_controle_bot(),
+                reply_markup=bot_controle_markup(),
+            )
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "voltar_painel_principal")
+def voltar_painel_principal_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "🤖 Meu Analisador Estatístico\n\nEscolha uma opção:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=painel_markup(),
+        )
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ativar_alertas_surfe")
+def ativar_alertas_surfe_callback(call):
+    """Primeiro pergunta qual SURF deve ser acompanhado."""
+    try:
+        bot.answer_callback_query(call.id)
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton(
+            "⚫ SOMENTE SURF 2 PRETOS", callback_data="ativar_alertas_modo:Preto"
+        ))
+        markup.add(telebot.types.InlineKeyboardButton(
+            "🔴 SOMENTE SURF 2 VERMELHOS", callback_data="ativar_alertas_modo:Vermelho"
+        ))
+        markup.add(telebot.types.InlineKeyboardButton(
+            "⚫🔴 OS DOIS SURFS", callback_data="ativar_alertas_modo:Ambos"
+        ))
+        bot.send_message(
+            call.message.chat.id,
+            "🔥 ALERTAS SURF — ESCOLHA O MONITORAMENTO\n\n"
+            "O bot vai analisar TODOS os pontos/caminhos possíveis das 2.000 rodadas.\n\n"
+            "🔕 G1 até G8: silencioso.\n"
+            "🚨 G9: envia o SINAL para a próxima rodada.\n"
+            "❌ Se não bater: Gale 1 até Gale 6.\n"
+            "✅ Acertou: GREEN.\n"
+            "🛑 Não bateu até Gale 6: LOSS / STOP.\n\n"
+            "👇 Escolha qual SURF deseja acompanhar:",
+            reply_markup=markup,
+        )
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao abrir alertas: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ativar_alertas_modo:"))
+def ativar_alertas_modo_callback(call):
+    global alertas_surfe_ativos
+    try:
+        modo = call.data.split(":", 1)[1]
+        if modo not in ("Preto", "Vermelho", "Ambos"):
+            return
+
+        bot.answer_callback_query(call.id, "Ativando monitor...")
+        with alertas_surfe_lock:
+            alertas_surfe_ativos = True
+
+        _iniciar_monitor_alertas_surfe(modo)
+
+        nomes = {
+            "Preto": "⚫ SURF 2 PRETOS",
+            "Vermelho": "🔴 SURF 2 VERMELHOS",
+            "Ambos": "⚫ SURF 2 PRETOS + 🔴 SURF 2 VERMELHOS",
+        }
+        bot.send_message(
+            ALERTAS_CHAT_ID,
+            "🔥 ALERTAS SURF\n\n"
+            "🟢 MONITORAMENTO G9 ATIVADO\n"
+            f"🏄 Modo: {nomes[modo]}\n\n"
+            "🔕 O canal ficará silencioso até algum caminho chegar exatamente ao G9."
+        )
+        try:
+            bot.edit_message_reply_markup(
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+        bot.send_message(
+            call.message.chat.id,
+            "🟢 ALERTAS SURF ATIVADOS.\n\n"
+            f"🏄 Monitorando: {nomes[modo]}\n"
+            "📚 Todos os pontos possíveis da janela de 2.000 rodadas.\n"
+            "🚨 O sinal só aparece quando um caminho completar G9.\n"
+            "🛑 Após o sinal, o máximo é Gale 6.",
+            reply_markup=bot_controle_markup(),
+        )
+    except Exception as erro:
+        with alertas_surfe_lock:
+            alertas_surfe_ativos = False
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao ativar alertas: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "registro_alertas_surfe")
+def registro_alertas_surfe_callback(call):
+    try:
+        bot.answer_callback_query(call.id, "Abrindo registros online...")
+        bot.send_message(
+            call.message.chat.id,
+            _alerta_texto_registro_online(),
+            reply_markup=_alerta_markup_registro_online(),
+        )
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "atualizar_registro_alertas_surfe")
+def atualizar_registro_alertas_surfe_callback(call):
+    try:
+        bot.answer_callback_query(call.id, "Atualizando...")
+        bot.edit_message_text(
+            _alerta_texto_registro_online(),
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=_alerta_markup_registro_online(),
+        )
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "registro_sinais_surfe")
+def registro_sinais_surfe_callback(call):
+    try:
+        bot.answer_callback_query(call.id, "Abrindo registros de sinais...")
+        chat_id = call.message.chat.id
+        with alertas_surfe_lock:
+            ultimo_id = alertas_surfe_registro_sinais[-1]["id"] if alertas_surfe_registro_sinais else 0
+            alertas_surfe_registro_sinais_vistos_chat[chat_id] = ultimo_id
+        bot.send_message(
+            chat_id,
+            _alerta_texto_registros_sinais(),
+            reply_markup=_alerta_markup_registros_sinais(),
+        )
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "atualizar_registro_sinais_surfe")
+def atualizar_registro_sinais_surfe_callback(call):
+    try:
+        chat_id = call.message.chat.id
+        with alertas_surfe_lock:
+            ultimo_atual = alertas_surfe_registro_sinais[-1]["id"] if alertas_surfe_registro_sinais else 0
+            ultimo_visto = alertas_surfe_registro_sinais_vistos_chat.get(chat_id, 0)
+
+        if ultimo_atual <= ultimo_visto:
+            aviso = "❌ NENHUM SINAL NOVO"
+            bot.answer_callback_query(call.id, "Nenhum sinal novo")
+        else:
+            quantidade_nova = ultimo_atual - ultimo_visto
+            aviso = f"✅ {quantidade_nova} SINAL(IS) NOVO(S)"
+            bot.answer_callback_query(call.id, "Registros atualizados")
+            with alertas_surfe_lock:
+                alertas_surfe_registro_sinais_vistos_chat[chat_id] = ultimo_atual
+
+        bot.edit_message_text(
+            _alerta_texto_registros_sinais(aviso),
+            chat_id,
+            call.message.message_id,
+            reply_markup=_alerta_markup_registros_sinais(),
+        )
+    except Exception:
+        traceback.print_exc()
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "status_alertas_surfe")
+def status_alertas_surfe_callback(call):
+    try:
+        bot.answer_callback_query(call.id, "Consultando monitor...")
+        bot.send_message(call.message.chat.id, _alerta_texto_status_monitor())
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao consultar status: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "desativar_alertas_surfe")
+def desativar_alertas_surfe_callback(call):
+    global alertas_surfe_ativos, alertas_surfe_ultima_rodada_id, alertas_surfe_modo
+    try:
+        with alertas_surfe_lock:
+            alertas_surfe_ativos = False
+            alertas_surfe_ultima_rodada_id = None
+            alertas_surfe_modo = None
+        bot.answer_callback_query(call.id, "Alertas desativados")
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=bot_controle_markup(),
+        )
+        try:
+            bot.send_message(
+                ALERTAS_CHAT_ID,
+                "🔥 ALERTAS SURF\n\n🔴 MONITORAMENTO AO VIVO DESATIVADO.\n\n" + _alerta_resumo_stats()
+            )
+        except Exception:
+            pass
+        bot.send_message(call.message.chat.id, "🔴 ALERTAS SURF DESATIVADOS.")
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(call.message.chat.id, f"❌ Erro ao desativar alertas: {type(erro).__name__}: {str(erro)[:250]}")
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "testar_canal_alertas")
+def testar_canal_alertas_callback(call):
+    try:
+        bot.answer_callback_query(call.id, "Testando canal...")
+        bot.send_message(
+            ALERTAS_CHAT_ID,
+            "🔥 ALERTAS SURF\n\n"
+            "✅ Conexão com o canal funcionando.\n"
+            "🤖 BOT ANALISADOR ESTATÍSTICO conectado com sucesso."
+        )
+        bot.send_message(
+            call.message.chat.id,
+            "✅ Teste enviado para o canal 🔥 ALERTAS SURF."
+        )
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.send_message(
+                call.message.chat.id,
+                f"❌ Erro ao testar o canal: {type(erro).__name__}: {str(erro)[:250]}"
+            )
+        except Exception:
+            pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("surfe", "seq10", "seqcores", "branco_atraso", "ult50", "total", "ultima"))
+def painel_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        # As estratégias usam diretamente os 2.000 registros já salvos no banco.
+        # NÃO atualizar a API ao clicar, para a análise responder imediatamente.
+
+        if call.data == "surfe":
+            chat_id = call.message.chat.id
+            surfe_cache.pop(chat_id, None)
+            surfe_mensagens_abertas[chat_id] = []
+
+            texto = "\n".join([
+                "⚪⚫🔴 SURF — ESCOLHA O CAMINHO",
+                "",
+                "👇 Escolha qual tipo de ponto você quer usar para iniciar a análise do SURF.",
+                "",
+                "⚪ BRANCO",
+                "🔴 VERMELHO",
+                "⚫ PRETO",
+                "",
+                "📊 Todos os caminhos usam o mesmo sistema do SURF. O que muda é somente o ponto inicial escolhido.",
+            ])
+            markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+            markup.add(telebot.types.InlineKeyboardButton("⚪ BRANCO", callback_data="surfe_caminho:Branco"))
+            markup.add(telebot.types.InlineKeyboardButton("🔴 VERMELHO", callback_data="surfe_caminho:Vermelho"))
+            markup.add(telebot.types.InlineKeyboardButton("⚫ PRETO", callback_data="surfe_caminho:Preto"))
+            markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+            msg = bot.send_message(chat_id, texto, reply_markup=markup)
+            surfe_mensagens_abertas[chat_id].append(msg.message_id)
+            return
+
+        if call.data == "seqcores":
+            resultado = analisar_sequencias_de_cores_iguais()
+            bot.send_message(call.message.chat.id, resultado)
+            return
+
+        if call.data == "branco_atraso":
+            resultado = analisar_atraso_do_branco()
+            # Telegram aceita no máximo 4096 caracteres por mensagem.
+            for pos in range(0, len(resultado), 3900):
+                bot.send_message(call.message.chat.id, resultado[pos:pos + 3900])
+            return
+
+        if call.data == "total":
+            total = contar_rodadas_banco()
+            bot.send_message(
+                call.message.chat.id,
+                f"📚 TOTAL NO HISTÓRICO\n\n🔢 {total:,} rodadas\n💾 Limite: {MAX_HISTORY:,}"
+            )
+            return
+
+        if call.data == "ultima":
+            dados = obter_historico_banco(limite=1)
+            if not dados:
+                bot.send_message(call.message.chat.id, "❌ Nenhuma rodada registrada ainda.")
+                return
+
+            r = dados[0]
+            data, hora = formatar_data_hora(r.get("instant"), r.get("tempo"))
+            cor = normalizar_cor_analise(r)
+            bot.send_message(
+                call.message.chat.id,
+                f"🕐 ÚLTIMA RODADA\n\n"
+                f"📅 {data}\n"
+                f"⏰ {hora}\n"
+                f"🎰 {r.get('numero')}\n"
+                f"{emoji_cor(cor)} {str(cor or 'desconhecida').upper()}"
+            )
+            return
+
+        if call.data == "ult50":
+            dados = obter_historico_banco(limite=50)
+            linhas = ["📊 ÚLTIMAS 50 RODADAS", ""]
+            for n, r in enumerate(dados, 1):
+                _, hora = formatar_data_hora(r.get("instant"), r.get("tempo"))
+                cor = normalizar_cor_analise(r)
+                linhas.append(f"{n:02d}. {emoji_cor(cor)} {r.get('numero')} — {hora}")
+            bot.send_message(call.message.chat.id, "\n".join(linhas))
+            return
+
+        bot.send_message(
+            call.message.chat.id,
+            "📚 COMO FUNCIONA\n\n"
+            "Esta estratégia procura, dentro dos 2.000 registros, momentos em que ocorreram "
+            "10 resultados consecutivos da mesma cor.\n\n"
+            "Depois de encontrar uma sequência de 10 cores iguais, analisamos as rodadas "
+            "seguintes para verificar em qual posição a cor oposta apareceu.\n\n"
+            "📊 O objetivo é identificar estatisticamente o comportamento das rodadas após "
+            "uma sequência de 10 resultados iguais.\n\n"
+            "⚠️ A análise é estatística/histórica e não garante o resultado da próxima rodada."
+        )
+
+        resultado = analisar_sequencias_de_10_completas()
+        if isinstance(resultado, list):
+            bot.send_message(call.message.chat.id, resultado[0])
+            detalhes = resultado[1]
+            for pos in range(0, len(detalhes), 3900):
+                bot.send_message(call.message.chat.id, detalhes[pos:pos + 3900])
+        else:
+            bot.send_message(call.message.chat.id, resultado)
+
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(
+            call.message.chat.id,
+            f"❌ Erro na análise: {type(erro).__name__}: {str(erro)[:250]}"
+        )
+
+
+@bot.message_handler(func=lambda message: True)
+def responder_usuario(message):
+    try:
+        pergunta_usuario = message.text or ""
+        if pergunta_usuario.strip().upper() == "TESTE 123":
+            bot.reply_to(message, "✅ Telegram - Render - Bot está funcionando.")
+            return
+
+        # Reutiliza a base de 2.000 por alguns segundos para não fazer
+        # uma requisição + 2.000 INSERTs a cada mensagem.
+        atualizar_historico_tipminer()
+
+        cor = identificar_cor_perguntada(pergunta_usuario)
+        texto = pergunta_usuario.lower()
+        ultima = any(x in texto for x in ("último", "última", "ultimo", "ultima"))
+
+        # Último branco/vermelho/preto: consulta direta e atualizada no PostgreSQL.
+        if cor and ultima:
+            rodada = obter_ultimo_por_cor(cor)
+            if not rodada:
+                bot.reply_to(message, f"❌ Não encontrei nenhum {cor.lower()} salvo no histórico.")
+            else:
+                bot.reply_to(message, montar_resposta_ultima_cor(rodada))
+            return
+
+        # Para perguntas gerais, enviamos as 2.000 rodadas atuais ao Gemini.
+        dados = obter_historico(limite=ANALYSIS_ROUNDS)
+        instrucao_ia = """
+Você é o ANALISADOR ESTATÍSTICO do bot da Double.
+
+REGRA PRINCIPAL:
+- Analise SOMENTE o histórico JSON fornecido.
+- Cada registro é uma rodada/evento: DOUBLE=Vermelho, DEFAULT=Preto, LUCKY=Branco (0).
+- O histórico está ordenado da rodada mais recente para a mais antiga.
+- Nunca invente dados, horários, resultados, ocorrências ou percentuais.
+- Não faça previsão, palpite, recomendação de aposta, estratégia de aposta ou gerenciamento de banca.
+FORMATO DAS RESPOSTAS:
+- Responda em português do Brasil.
+- Seja MUITO direto e organizado.
+- Não escreva introduções como "Aqui estão...", "Com base..." ou explicações da metodologia.
+- Não repita a pergunta do usuário.
+- Não faça textos longos ou relatórios.
+- Use no máximo 12 linhas quando a pergunta puder ser respondida de forma resumida.
+- Use emojis para facilitar a leitura.
+- Use SEMPRE data e hora com segundos quando o horário estiver disponível.
+- Não use Markdown com **, # ou tabelas.
+
+QUANDO PEDIR RODADAS RECENTES:
+- Mostre somente a quantidade solicitada, da mais recente para a mais antiga.
+- Uma rodada deve ocupar UMA ÚNICA LINHA, neste formato:
+  "1. 🕐 03:32:46 — 🔴 Vermelho — Nº 7"
+- Não escreva "tipo: DOUBLE/DEFAULT/LUCKY", pois a cor já informa isso.
+- Se houver data disponível e a consulta envolver mais de uma data, inclua a data de forma compacta.
+
+QUANDO PEDIR ESTATÍSTICAS OU SEQUÊNCIAS:
+- Mostre primeiro o resultado principal.
+- Agrupe ocorrências por tamanho/cor quando isso for possível.
+- Evite listar cada ocorrência individual se o usuário não pedir isso.
+- Termine com um resumo curto, se houver informação útil.
+EXEMPLO DE ESTILO:
+📊 RESULTADO
+🔴 5 iguais — 3 ocorrências
+⚫ 5 iguais — 2 ocorrências
+🏆 Maior: 7 🔴
+📅 28/08/2026 🕐 03:11:10
+
+IMPORTANTE: precisão primeiro, simplicidade depois. Entregue somente o que responde à pergunta.
+"""
+        conteudo = (
+            "HISTÓRICO DA DOUBLE SALVO NO BANCO POSTGRESQL:\n" +
+            json.dumps(dados, ensure_ascii=False) +
+            "\n\nPERGUNTA DO USUÁRIO:\n" + pergunta_usuario
+        )
+        resposta = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=conteudo,
+            config=types.GenerateContentConfig(
+                system_instruction=instrucao_ia,
+                temperature=0.1
+            )
+        )
+        if not resposta.text:
+            raise RuntimeError("Gemini retornou uma resposta vazia.")
+
+        texto_resposta = resposta.text.strip()
+        # Telegram está sendo usado sem parse_mode: remova marcadores Markdown
+        # que deixam a resposta visualmente poluída (ex.: **Horário:**).
+        texto_resposta = texto_resposta.replace("**", "")
+        texto_resposta = texto_resposta.replace("__", "")
+        # Reduz excesso de linhas em branco sem alterar o conteúdo.
+        while "\n\n\n" in texto_resposta:
+            texto_resposta = texto_resposta.replace("\n\n\n", "\n\n")
+
+        bot.reply_to(message, texto_resposta)
+
+    except Exception as erro:
+        traceback.print_exc()
+        try:
+            bot.reply_to(
+                message,
+                "❌ Ainda não consegui obter os dados da Double.\n\n" +
+                f"Erro: {type(erro).__name__}: {str(erro)[:300]}"
+            )
+        except Exception:
+            pass
+
+
+
+
+def _simular_sequencia_financeira(resultados, entrada, limite=None):
+    """Simula uma sequência booleana; limite=None significa progressão histórica sem STOP."""
+    saldo=Decimal("0.00"); menor=Decimal("0.00"); pico=Decimal("0.00"); drawdown=Decimal("0.00")
+    perdas=0; maior_gale=0; maior_gale_solucionado=0; maior_aposta=Decimal("0.00")
+    acertos_diretos=0; recuperados=0; stops=0; linhas=[]
+    pior_capital=Decimal("0.00")
+    maior_capital_total=Decimal("0.00")
+    capital_ciclo_atual=Decimal("0.00")
+    for i, acertou in enumerate(resultados,1):
+        aposta=entrada*(Decimal(2)**perdas); maior_aposta=max(maior_aposta,aposta)
+        capital_ciclo_atual += aposta
+        maior_capital_total=max(maior_capital_total,capital_ciclo_atual)
+        if acertou:
+            if perdas: recuperados+=1; maior_gale_solucionado=max(maior_gale_solucionado,perdas); marcador="♻️"
+            else: acertos_diretos+=1; marcador="✅"
+            saldo += aposta; perdas=0; capital_ciclo_atual=Decimal("0.00")
+        else:
+            saldo -= aposta; perdas += 1; maior_gale=max(maior_gale,perdas); marcador="❌"
+            pior_capital=max(pior_capital, entrada*((Decimal(2)**perdas)-Decimal(1)))
+            if limite is not None and perdas>=limite:
+                stops+=1; marcador = "🛑"; perdas=0; capital_ciclo_atual=Decimal("0.00")
+        pico=max(pico,saldo); menor=min(menor,saldo); drawdown=max(drawdown,pico-saldo)
+        linhas.append(f"{i:02d}  {marcador}   {_formatar_reais_surfe(aposta)}   {_formatar_reais_surfe(saldo)}")
+    if perdas:
+        pior_capital=max(pior_capital,entrada*((Decimal(2)**perdas)-Decimal(1)))
+    return {"saldo":saldo,"menor":menor,"drawdown":drawdown,"maior_gale":maior_gale,"maior_gale_solucionado":maior_gale_solucionado,"maior_aposta":maior_aposta,"pior_capital":pior_capital,"maior_capital_total":maior_capital_total,"aberto":perdas,"diretos":acertos_diretos,"recuperados":recuperados,"stops":stops,"linhas":linhas}
+
+
+def _enviar_resultado_financeiro_novo(chat_id, titulo, subtitulo, resultados, entrada, limite=None):
+    r=_simular_sequencia_financeira(resultados,entrada,limite)
+    estado = surfe_cache.get(chat_id) or {}
+    estado["gale_avancado_base"] = {
+        "resultados": list(resultados),
+        "entrada": str(entrada),
+        "titulo": titulo,
+        "subtitulo": subtitulo,
+    }
+    surfe_cache[chat_id] = estado
+    _enviar_blocos_aposta_surfe(chat_id,r["linhas"])
+    modo="♾️ SEM LIMITE" if limite is None else f"🛑 COM LIMITE G{limite}"
+    saldo_txt=("+" if r["saldo"]>0 else "")+_formatar_reais_surfe(r["saldo"])
+    linhas=[titulo,"",subtitulo,f"⚙️ Modo: {modo}",f"💵 Entrada inicial: {_formatar_reais_surfe(entrada)}","","📊 RESULTADO DOS CICLOS","",f"🟢 Acertos diretos: {r['diretos']}",f"♻️ Ciclos recuperados: {r['recuperados']}"]
+    if limite is not None: linhas.append(f"🛑 Stops: {r['stops']}")
+    linhas += ["","💰 RESULTADO FINANCEIRO","",f"💰 Lucro/prejuízo total: {saldo_txt}",f"📈 Saldo final: {saldo_txt}",f"🔥 Maior Gale observado: G{r['maior_gale']}" if r['maior_gale'] else "🔥 Maior Gale observado: Nenhum",f"♻️ Maior Gale solucionado: G{r['maior_gale_solucionado']}" if r['maior_gale_solucionado'] else "♻️ Maior Gale solucionado: Nenhum",f"💵 Maior aposta individual realizada: {_formatar_reais_surfe(r['maior_aposta'])}",f"💸 Perdas acumuladas antes da recuperação: {_formatar_reais_surfe(r['pior_capital'])}",f"🏦 Capital total necessário no pior ciclo: {_formatar_reais_surfe(r['maior_capital_total'])}",f"📈 Retorno sobre o capital do pior ciclo: {(r['saldo'] / r['maior_capital_total'] * Decimal('100')):.2f}%" if r['maior_capital_total'] > 0 else "📈 Retorno sobre o capital do pior ciclo: 0,00%",f"📉 Maior déficit: {_formatar_reais_surfe(r['menor'])}",f"📉 Maior drawdown: {_formatar_reais_surfe(r['drawdown'])}"]
+    if r['aberto']:
+        linhas += ["",f"⏳ Ciclo em aberto no final: G{r['aberto']}","⚠️ Esse Gale ainda não foi solucionado dentro do recorte."]
+
+    # Referência numérica baseada exclusivamente no pior ciclo encontrado neste recorte.
+    capital_ref = r['maior_capital_total']
+    capital_mais_resultado = capital_ref + r['saldo']
+    retorno_ref = (r['saldo'] / capital_ref * Decimal("100")) if capital_ref > 0 else Decimal("0")
+    retorno_ref_txt = f"{retorno_ref:.2f}".replace(".", ",")
+    resultado_ref_txt = ("+" if r['saldo'] > 0 else "") + _formatar_reais_surfe(r['saldo'])
+    capital_final_txt = _formatar_reais_surfe(capital_mais_resultado)
+    maior_gale_ref = r['maior_gale_solucionado'] or r['maior_gale']
+
+    linhas += [
+        "",
+        "💡 REFERÊNCIA DE CAPITAL — NESTA ANÁLISE",
+        "",
+        f"🏦 Capital necessário: {_formatar_reais_surfe(capital_ref)}",
+        f"💰 Lucro/prejuízo obtido: {resultado_ref_txt}",
+        f"💵 Capital + resultado: {capital_final_txt}",
+        f"📈 Retorno sobre o capital de referência: {retorno_ref_txt}%",
+        "",
+        (f"📌 Neste recorte histórico, para atravessar o maior ciclo encontrado (G{maior_gale_ref}), "
+         f"a simulação precisou de até {_formatar_reais_surfe(capital_ref)} de capital e terminou com "
+         f"{resultado_ref_txt} de lucro/prejuízo."),
+        "",
+        f"⚠️ {_formatar_reais_surfe(capital_ref)} é uma referência baseada no pior ciclo encontrado neste recorte histórico; não representa a banca necessária para resultados futuros.",
+        "",
+        "⚠️ Resultado referente somente ao recorte histórico analisado; não garante o mesmo comportamento em novas rodadas.",
+    ]
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    m=bot.send_message(chat_id,"\n".join(linhas), reply_markup=markup); surfe_mensagens_abertas.setdefault(chat_id,[]).append(m.message_id)
+
+
+def _receber_valor_gatilho_surfe(message):
+    chat_id=message.chat.id; estado=surfe_cache.get(chat_id) or {}
+    try: entrada=_parse_valor_aposta_surfe(message.text)
+    except Exception:
+        msg=bot.send_message(chat_id,"❌ Valor inválido. Digite novamente, por exemplo: 0,10 | 1,00"); bot.register_next_step_handler(msg,_receber_valor_gatilho_surfe); return
+    resultado=estado.get("gatilho_resultado") or {}; ops=resultado.get("oportunidades",[])
+    if not ops: bot.send_message(chat_id,"❌ A análise do gatilho expirou. Escolha o gatilho novamente."); return
+    resultados=[bool(x.get("acertou")) for x in ops]; limite=estado.get("gatilho_limite") if estado.get("gatilho_modo")=="com_limite" else None
+    gatilho=estado.get("gatilho_gale"); caminho=estado.get("gatilho_caminho"); cor="🔴" if caminho=="Vermelho" else "⚫"
+    analise=_obter_analise_surfe_selecionada(chat_id)
+    branco_txt = f"{_identificacao_ponto_surfe(analise).upper()} SELECIONADO\n📅 {analise['data_ponto']} às {analise['hora_ponto']}" if analise else "PONTO INICIAL SELECIONADO"
+    _enviar_resultado_financeiro_novo(chat_id,f"🎯 RESULTADO FINANCEIRO — GATILHO G{gatilho}",f"{branco_txt}\n\n🏄 {cor} SURF | 🔎 {len(resultados)} oportunidades",resultados,entrada,limite)
+
+
+def _receber_valor_sem_limite_surfe(message):
+    chat_id=message.chat.id; estado=surfe_cache.get(chat_id) or {}
+    try: entrada=_parse_valor_aposta_surfe(message.text)
+    except Exception:
+        msg=bot.send_message(chat_id,"❌ Valor inválido. Digite novamente, por exemplo: 0,10 | 1,00"); bot.register_next_step_handler(msg,_receber_valor_sem_limite_surfe); return
+    analise=_obter_analise_surfe_selecionada(chat_id); caminho=estado.get("aposta_caminho")
+    if not analise or caminho not in ("Vermelho","Preto"): bot.send_message(chat_id,"❌ A simulação expirou. Abra novamente a APOSTA."); return
+    campo="resultado_vermelho" if caminho=="Vermelho" else "resultado_preto"; resultados=[str(x.get(campo,"")).startswith("✅") for x in analise["registros"]]
+    cor="🔴" if caminho=="Vermelho" else "⚫"; _enviar_resultado_financeiro_novo(chat_id,"💵 SIMULAÇÃO CONTÍNUA — SEM LIMITE",f"🏄 {cor} SURF | 📚 {len(resultados)} rodadas",resultados,entrada,None)
+
+
+
+def _runs_perdas_gale_avancado(resultados):
+    """Retorna cada sequência de perdas uma única vez, com posição inicial e final."""
+    runs = []
+    inicio = None
+    perdas = 0
+    for i, acertou in enumerate(resultados):
+        if not acertou:
+            if inicio is None:
+                inicio = i
+            perdas += 1
+            continue
+        if perdas:
+            runs.append({"inicio": inicio, "perdas": perdas, "fim": i, "solucionado": True})
+        inicio = None
+        perdas = 0
+    if perdas:
+        runs.append({"inicio": inicio, "perdas": perdas, "fim": len(resultados) - 1, "solucionado": False})
+    return runs
+
+
+def _resultados_gale_avancado_por_caminho(analise, caminho):
+    campo = "resultado_vermelho" if caminho == "Vermelho" else "resultado_preto"
+    return [str(x.get(campo, "")).startswith("✅") for x in analise.get("registros", [])]
+
+
+def _ocorrencias_gale_avancado(analise, caminho, ponto):
+    """Retorna somente as ocorrências cujo caminho terminou exatamente no Gale escolhido."""
+    resultados = _resultados_gale_avancado_por_caminho(analise, caminho)
+    runs = _runs_perdas_gale_avancado(resultados)
+    ocorrencias = []
+    for run in runs:
+        if run["perdas"] != ponto:
+            continue
+        ocorrencias.append({
+            "caminho": caminho,
+            "inicio": run["inicio"],
+            "fim": run["fim"],
+            "perdas": run["perdas"],
+            "solucionado": run["solucionado"],
+        })
+    return ocorrencias
+
+
+def _resumo_ponto_gale_avancado(resultados, ponto, entrada):
+    """Simula dinheiro somente depois do Gale observado, reiniciando a cada ocorrência."""
+    runs = _runs_perdas_gale_avancado(resultados)
+    elegiveis = [r for r in runs if r["perdas"] > ponto]
+    entradas = []
+    profundidades = []
+    abertas = 0
+    for r in elegiveis:
+        restante = r["perdas"] - ponto
+        profundidades.append(restante)
+        entradas.extend([False] * restante)
+        if r["solucionado"]:
+            entradas.append(True)
+        else:
+            abertas += 1
+    sim = _simular_sequencia_financeira(entradas, entrada, None) if entradas else None
+    return {
+        "ponto": ponto,
+        "ocorrencias": len(elegiveis),
+        "profundidades": profundidades,
+        "maior_restante": max(profundidades) if profundidades else 0,
+        "abertas": abertas,
+        "resultados": entradas,
+        "sim": sim,
+    }
+
+
+def _candidatos_gale_avancado_caminho(analise, caminho):
+    """Retorna o maior Gale e os pontos viáveis somente do SURF escolhido."""
+    resultados = _resultados_gale_avancado_por_caminho(analise, caminho)
+    runs = _runs_perdas_gale_avancado(resultados)
+    maior = max((r["perdas"] for r in runs), default=0)
+
+    if maior < 4:
+        return maior, []
+
+    inicio = max(2, maior // 2 - 1)
+    candidatos = []
+    for ponto in range(inicio, maior + 1):
+        quantidade = sum(1 for r in runs if r["perdas"] == ponto)
+        if quantidade:
+            candidatos.append({"ponto": ponto, "quantidade": quantidade})
+    return maior, candidatos
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "surfe_gale_avancado")
+def surfe_gale_avancado_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        analise = _obter_analise_surfe_selecionada(chat_id)
+        if not analise:
+            bot.send_message(chat_id, "❌ O recorte do SURF expirou. Escolha novamente o ponto inicial e a quantidade de rodadas.")
+            return
+
+        texto = [
+            "🔥 GALE AVANÇADO", "",
+            f"{_identificacao_ponto_surfe(analise)}: {analise['data_ponto']} às {analise['hora_ponto']}",
+            f"📚 Recorte: {len(analise['registros'])} rodadas", "",
+            "📌 COMO FUNCIONA", "",
+            "👁️ Primeiro escolha qual SURF deseja analisar.",
+            "🔎 O bot localizará os Gales encontrados naquele SURF.",
+            "📊 Ao escolher um Gale, será mostrado o caminho completo da ocorrência:",
+            "1 rodada antes → G1 → G2 → ... → Gale encontrado → 1 rodada depois.",
+            "🎯 Assim você poderá acompanhar exatamente como o Gale se formou, rodada por rodada.", "",
+            "👇 Escolha o SURF:"
+        ]
+
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton(
+            "🔴 SURF — 2 VERMELHOS",
+            callback_data="surfe_gale_avancado_caminho:Vermelho"
+        ))
+        markup.add(telebot.types.InlineKeyboardButton(
+            "⚫ SURF — 2 PRETOS",
+            callback_data="surfe_gale_avancado_caminho:Preto"
+        ))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        m = bot.send_message(chat_id, "\n".join(texto), reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro no Gale Avançado: {type(erro).__name__}: {str(erro)[:220]}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_gale_avancado_caminho:"))
+def surfe_gale_avancado_caminho_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        caminho = call.data.split(":", 1)[1]
+        if caminho not in ("Vermelho", "Preto"):
+            return
+
+        analise = _obter_analise_surfe_selecionada(chat_id)
+        if not analise:
+            bot.send_message(chat_id, "❌ O recorte do SURF expirou. Abra novamente o Gale Avançado.")
+            return
+
+        maior, candidatos = _candidatos_gale_avancado_caminho(analise, caminho)
+        emoji = "🔴" if caminho == "Vermelho" else "⚫"
+        nome = "SURF — 2 VERMELHOS" if caminho == "Vermelho" else "SURF — 2 PRETOS"
+
+        estado = surfe_cache.get(chat_id) or {}
+        estado["gale_avancado_caminho"] = caminho
+        estado["gale_avancado_candidatos"] = candidatos
+        surfe_cache[chat_id] = estado
+
+        if maior < 4 or not candidatos:
+            markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+            markup.add(telebot.types.InlineKeyboardButton("🔄 TROCAR SURF", callback_data="surfe_gale_avancado"))
+            bot.send_message(
+                chat_id,
+                f"🔥 GALE AVANÇADO — {emoji} {nome}\n\n"
+                f"🔥 Maior Gale encontrado: G{maior}\n\n"
+                "📌 Neste recorte não apareceu um Gale grande o suficiente para a análise avançada ser útil.",
+                reply_markup=markup
+            )
+            return
+
+        texto = [
+            f"🔥 GALE AVANÇADO — {emoji} {nome}", "",
+            f"🔥 Maior Gale encontrado: G{maior}", "",
+            "🔎 Escolha qual Gale deseja visualizar.",
+            "📊 O bot mostrará as ocorrências desse Gale com o caminho completo.",
+            "👁️ Cada ocorrência mostra: 1 rodada antes → G1 → ... → Gale escolhido → 1 rodada depois.", "",
+            "👇 Escolha o Gale:"
+        ]
+
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        for item in candidatos:
+            ponto = item["ponto"]
+            quantidade = item["quantidade"]
+            markup.add(telebot.types.InlineKeyboardButton(
+                f"🔎 GALE {_numero_gale_visual(ponto)} — {quantidade} ocorrência(s)",
+                callback_data=f"surfe_gale_avancado_ponto:{ponto}"
+            ))
+        markup.add(telebot.types.InlineKeyboardButton("🔄 TROCAR SURF", callback_data="surfe_gale_avancado"))
+        markup.add(telebot.types.InlineKeyboardButton("🔽 OCULTAR SURF", callback_data="surfe_ocultar"))
+        m = bot.send_message(chat_id, "\n".join(texto), reply_markup=markup)
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro ao escolher o SURF: {type(erro).__name__}: {str(erro)[:220]}")
+
+
+def _recortar_visual_gale_avancado_caminho(analise, inicio, fim, caminho):
+    """Recorta somente o SURF escolhido, sem montar duas colunas lado a lado."""
+    registros = analise.get("registros") or []
+    if not registros or inicio < 0 or fim < inicio or fim >= len(registros):
+        return ""
+
+    trecho = registros[inicio:fim + 1]
+    numero_final_analise = int(registros[-1]["numero"])
+    linhas = _montar_linhas_estrategia_surfe(
+        trecho, caminho, numero_final_analise
+    )
+    titulo = "SURF🔴" if caminho == "Vermelho" else "SURF⚫"
+    return titulo + "\n\n" + "\n".join(linhas)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("surfe_gale_avancado_ponto:"))
+def surfe_gale_avancado_ponto_callback(call):
+    try:
+        bot.answer_callback_query(call.id)
+        chat_id = call.message.chat.id
+        ponto = int(call.data.split(":", 1)[1])
+        analise = _obter_analise_surfe_selecionada(chat_id)
+        estado = surfe_cache.get(chat_id) or {}
+        caminho = estado.get("gale_avancado_caminho")
+
+        if not analise:
+            bot.send_message(chat_id, "❌ O recorte do SURF expirou. Abra novamente o Gale Avançado.")
+            return
+        if caminho not in ("Vermelho", "Preto"):
+            bot.send_message(chat_id, "❌ Escolha novamente qual SURF deseja analisar.")
+            return
+
+        ocorrencias = _ocorrencias_gale_avancado(analise, caminho, ponto)
+        ocorrencias.sort(key=lambda x: x["inicio"])
+
+        if not ocorrencias:
+            bot.send_message(chat_id, f"❌ Nenhuma ocorrência de G{ponto} foi encontrada neste SURF.")
+            return
+
+        estado["gale_avancado_ponto"] = ponto
+        surfe_cache[chat_id] = estado
+
+        emoji = "🔴" if caminho == "Vermelho" else "⚫"
+        nome = "SURF — 2 VERMELHOS" if caminho == "Vermelho" else "SURF — 2 PRETOS"
+
+        intro = [
+            f"🔥 OCORRÊNCIAS — {emoji} {nome} — GALE {_numero_gale_visual(ponto)}", "",
+            "🔎 Abaixo estão as ocorrências encontradas.",
+            "📌 Cada desenho mostra 1 rodada antes do G1, o caminho completo do Gale e 1 rodada depois.", "",
+            f"📊 Ocorrências encontradas: {len(ocorrencias)}",
+        ]
+        m = bot.send_message(chat_id, "\n".join(intro))
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+        registros = analise["registros"]
+        for n, oc in enumerate(ocorrencias, 1):
+            inicio_g1 = oc["inicio"]
+            fim_run = oc["fim"]
+
+            # Uma rodada antes do G1, quando existir.
+            inicio_visual = max(0, inicio_g1 - 1)
+
+            # Em sequência solucionada, fim_run já é a rodada imediatamente
+            # posterior ao último Gale (a rodada que voltou a acertar).
+            # Se a sequência ficou aberta, mostramos até o último registro disponível.
+            fim_visual = min(len(registros) - 1, fim_run)
+
+            rodada_antes = int(registros[inicio_visual]["numero"]) if inicio_visual < inicio_g1 else None
+            rodada_g1 = int(registros[inicio_g1]["numero"])
+            idx_ultimo_gale = min(inicio_g1 + ponto - 1, len(registros) - 1)
+            rodada_gale = int(registros[idx_ultimo_gale]["numero"])
+            rodada_depois = int(registros[fim_visual]["numero"]) if fim_visual > idx_ultimo_gale else None
+
+            cabecalho = [f"🔥 OCORRÊNCIA {n}", ""]
+            if rodada_antes is not None:
+                cabecalho.append(f"📍 1 rodada antes: {rodada_antes}")
+            cabecalho += [
+                f"🔥 G1 começou: rodada {rodada_g1}",
+                f"👁️ G{ponto}: rodada {rodada_gale}",
+            ]
+            if rodada_depois is not None:
+                cabecalho.append(f"🏁 1 rodada depois: {rodada_depois}")
+            else:
+                cabecalho.append("🏁 1 rodada depois: ainda não disponível")
+            cabecalho.append("")
+
+            # Usa o formatador já aprovado do SURF, sem alterar o alinhamento
+            # nem a montagem dos registros originais.
+            visual = _recortar_visual_gale_avancado_caminho(
+                analise, inicio_visual, fim_visual, caminho
+            )
+            m = bot.send_message(chat_id, "\n".join(cabecalho) + "\n" + visual)
+            surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+        markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+        markup.add(telebot.types.InlineKeyboardButton(
+            "🔄 TROCAR GALE",
+            callback_data=f"surfe_gale_avancado_caminho:{caminho}"
+        ))
+        markup.add(telebot.types.InlineKeyboardButton(
+            "🔄 TROCAR SURF",
+            callback_data="surfe_gale_avancado"
+        ))
+        markup.add(telebot.types.InlineKeyboardButton(
+            "🔽 OCULTAR SURF",
+            callback_data="surfe_ocultar"
+        ))
+        m = bot.send_message(
+            chat_id,
+            "🔎 GALE AVANÇADO — INFORMAÇÕES\n\n"
+            "📌 Escolha abaixo se deseja consultar outro Gale ou trocar o SURF.",
+            reply_markup=markup
+        )
+        surfe_mensagens_abertas.setdefault(chat_id, []).append(m.message_id)
+
+    except Exception as erro:
+        traceback.print_exc()
+        bot.send_message(call.message.chat.id, f"❌ Erro ao mostrar as ocorrências: {type(erro).__name__}: {str(erro)[:220]}")
+
+
+# ==============================================================================
+# WEBHOOK DO TELEGRAM
+# ==============================================================================
+
+@app.route("/" + TELEGRAM_TOKEN, methods=["POST"])
+def receber_webhook():
+    try:
+        json_string = request.get_data().decode("utf-8")
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return "OK", 200
+    except Exception as erro:
+        print("========================================")
+        print("ERRO NO WEBHOOK")
+        print("TIPO:", type(erro).__name__)
+        print("ERRO:", str(erro))
+        print("========================================")
+        traceback.print_exc()
+        return "ERROR", 500
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Bot Online!"
+
+
+# ==============================================================================
+# CONFIGURAR WEBHOOK
+# ==============================================================================
+
+def configurar_webhook():
+    if not RENDER_EXTERNAL_URL:
+        print("RENDER_EXTERNAL_URL não encontrada.")
+        print("Webhook não configurado automaticamente.")
+        return
+
+    webhook_url = RENDER_EXTERNAL_URL.rstrip("/") + "/" + TELEGRAM_TOKEN
+
+    try:
+        bot.remove_webhook()
+        time.sleep(1)
+        sucesso = bot.set_webhook(
+            url=webhook_url,
+            allowed_updates=[
+                "message",
+                "edited_message",
+                "callback_query",
+                "channel_post",
+                "edited_channel_post",
+            ],
+        )
+
+        print("========================================")
+        print("WEBHOOK TELEGRAM")
+        print("URL:", webhook_url)
+        print("RESULTADO:", sucesso)
+        print("========================================")
+    except Exception as erro:
+        print("ERRO AO CONFIGURAR WEBHOOK:")
+        print(type(erro).__name__)
+        print(str(erro))
+        traceback.print_exc()
+
+
+# ==============================================================================
+# INICIALIZAÇÃO
+# ==============================================================================
+
+if __name__ == "__main__":
+    print("STARTING DOUBLE BOT")
+    print("====================")
+
+    inicializar_banco()
+    carregar_historico_fixo_tipminer()
+
+    try:
+        print("TESTE INICIAL POSTGRESQL:", contar_rodadas_banco(), "rodadas")
+    except Exception as erro:
+        print("⚠️ POSTGRESQL NÃO RESPONDEU NO TESTE INICIAL:")
+        print(type(erro).__name__, str(erro))
+
+    configurar_webhook()
+
+    print("====================")
+    print("TIPMINER TOKEN: SIM")
+    print("BASE FIXA: EXATAMENTE 2.000 RODADAS MAIS RECENTES")
+    print("FLASK STARTING")
+    print("PORT:", PORT)
+
+    app.run(
+        host="0.0.0.0",
+        port=PORT,
+        debug=False,
+        use_reloader=False,
+    )
